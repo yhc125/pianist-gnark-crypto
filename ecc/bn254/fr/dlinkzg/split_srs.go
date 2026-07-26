@@ -1,10 +1,19 @@
 package dlinkzg
 
 import (
+	"runtime"
+
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/bn254"
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 )
+
+func onlineMultiExpConfig() ecc.MultiExpConfig {
+	return ecc.MultiExpConfig{
+		NbTasks:     runtime.GOMAXPROCS(0),
+		ScalarsMont: true,
+	}
+}
 
 const (
 	// DeterministicSplitSRSNotice marks the constructors in this file as
@@ -183,7 +192,7 @@ func (srs *PartyRowSRS) CommitSemantic(p []fr.Element) (bn254.G1Affine, error) {
 	_, err := result.MultiExp(
 		srs.G1SemanticRow[:len(p)],
 		p,
-		ecc.MultiExpConfig{ScalarsMont: true},
+		onlineMultiExpConfig(),
 	)
 	return result, err
 }
@@ -206,7 +215,7 @@ func (srs *PartyRowSRS) CommitRow(p []fr.Element) (bn254.G1Affine, error) {
 	_, err := result.MultiExp(
 		srs.G1Row[:len(p)],
 		p,
-		ecc.MultiExpConfig{ScalarsMont: true},
+		onlineMultiExpConfig(),
 	)
 	return result, err
 }
@@ -228,7 +237,7 @@ func (srs *PartyRowSRS) CommitZ(p []fr.Element) (bn254.G1Affine, error) {
 	_, err := result.MultiExp(
 		srs.G1ZShared[:len(p)],
 		p,
-		ecc.MultiExpConfig{ScalarsMont: true},
+		onlineMultiExpConfig(),
 	)
 	return result, err
 }
@@ -249,7 +258,7 @@ func (srs *CoordinatorSRS) CommitY(coefficients []fr.Element) (bn254.G1Affine, e
 	_, err := result.MultiExp(
 		srs.G1Y[:len(coefficients)],
 		coefficients,
-		ecc.MultiExpConfig{ScalarsMont: true},
+		onlineMultiExpConfig(),
 	)
 	return result, err
 }
@@ -269,7 +278,7 @@ func (srs *CoordinatorSRS) CommitZ(coefficients []fr.Element) (bn254.G1Affine, e
 	_, err := result.MultiExp(
 		srs.G1ZShared[:len(coefficients)],
 		coefficients,
-		ecc.MultiExpConfig{ScalarsMont: true},
+		onlineMultiExpConfig(),
 	)
 	return result, err
 }
@@ -290,7 +299,7 @@ func (srs *VerifierSRS) CommitZ(coefficients []fr.Element) (bn254.G1Affine, erro
 	_, err := result.MultiExp(
 		srs.G1ZVerifier[:len(coefficients)],
 		coefficients,
-		ecc.MultiExpConfig{ScalarsMont: true},
+		onlineMultiExpConfig(),
 	)
 	return result, err
 }
@@ -405,7 +414,7 @@ func (srs *VerifierSRS) commitZInG2(coefficients []fr.Element) (bn254.G2Affine, 
 	_, err := result.MultiExp(
 		srs.G2Z[:len(coefficients)],
 		coefficients,
-		ecc.MultiExpConfig{ScalarsMont: true},
+		onlineMultiExpConfig(),
 	)
 	return result, err
 }

@@ -49,6 +49,30 @@ func TestFastTaylorShiftEdgeCases(t *testing.T) {
 	}
 }
 
+func TestFastTaylorShiftBatchMatchesIndependentShifts(t *testing.T) {
+	random := rand.New(rand.NewSource(0x4241544348534846))
+	shift := deterministicElements(random, 1)[0]
+	for _, size := range []int{0, 1, 8, 64, 256} {
+		polynomials := make([][]fr.Element, 3)
+		for i := range polynomials {
+			polynomials[i] = deterministicElements(random, size)
+		}
+		got := FastTaylorShiftBatch(polynomials, shift)
+		for i := range polynomials {
+			assertElementsEqual(t, got[i], TaylorShift(polynomials[i], shift))
+		}
+	}
+
+	unequal := [][]fr.Element{
+		deterministicElements(random, 3),
+		deterministicElements(random, 7),
+	}
+	got := FastTaylorShiftBatch(unequal, shift)
+	for i := range unequal {
+		assertElementsEqual(t, got[i], TaylorShift(unequal[i], shift))
+	}
+}
+
 func TestFastOffDiagMatchesReference(t *testing.T) {
 	random := rand.New(rand.NewSource(0x4f464644494147))
 	for size := 1; size <= 2048; size *= 2 {
