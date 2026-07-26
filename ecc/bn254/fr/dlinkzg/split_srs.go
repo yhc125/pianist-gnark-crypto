@@ -29,14 +29,13 @@ type PartyRowSRS struct {
 	G1ZShared   []bn254.G1Affine
 }
 
-// CoordinatorSRS contains the O(M) root-only Y column and the shared O(T) Z
-// row needed to commit t_0, t_1, and h_xi. It contains no mixed party row and
-// no G2 power.
+// CoordinatorSRS contains the O(M) root-only Y column and the O(M) Z prefix
+// needed to commit t_0, t_1, and h_xi, all of which have degree less than M.
+// It contains no mixed party row and no G2 power.
 type CoordinatorSRS struct {
-	Parties     int
-	DegreeBound int
-	G1Y         []bn254.G1Affine
-	G1ZShared   []bn254.G1Affine
+	Parties   int
+	G1Y       []bn254.G1Affine
+	G1ZShared []bn254.G1Affine
 }
 
 // VerifierSRS is the constant-size verifier view used by the source link and
@@ -74,19 +73,18 @@ func NewDeterministicPartyRowSRS(parties, degreeBound, rank int, tauY, tauZ fr.E
 	}, nil
 }
 
-// NewDeterministicCoordinatorSRS constructs the root Y column and shared Z row
+// NewDeterministicCoordinatorSRS constructs the root Y column and length-M Z prefix
 // without materializing a mixed party rectangle. It is benchmark/test-only;
 // see DeterministicSplitSRSNotice. Neither trapdoor is retained.
-func NewDeterministicCoordinatorSRS(parties, degreeBound int, tauY, tauZ fr.Element) (*CoordinatorSRS, error) {
-	if parties < 2 || degreeBound < verifierZPowers {
+func NewDeterministicCoordinatorSRS(parties int, tauY, tauZ fr.Element) (*CoordinatorSRS, error) {
+	if parties < 2 {
 		return nil, ErrInvalidSRS
 	}
 	_, _, generator1, _ := bn254.Generators()
 	return &CoordinatorSRS{
-		Parties:     parties,
-		DegreeBound: degreeBound,
-		G1Y:         batchScalarMultiplicationG1(&generator1, powers(tauY, parties)),
-		G1ZShared:   batchScalarMultiplicationG1(&generator1, powers(tauZ, degreeBound)),
+		Parties:   parties,
+		G1Y:       batchScalarMultiplicationG1(&generator1, powers(tauY, parties)),
+		G1ZShared: batchScalarMultiplicationG1(&generator1, powers(tauZ, parties)),
 	}, nil
 }
 
@@ -124,8 +122,8 @@ func (srs *PartyRowSRS) Validate() error {
 // Validate checks that the coordinator view has exactly the declared Y
 // column and no rectangular row material.
 func (srs *CoordinatorSRS) Validate() error {
-	if srs == nil || srs.Parties < 2 || srs.DegreeBound < verifierZPowers ||
-		len(srs.G1Y) != srs.Parties || len(srs.G1ZShared) != srs.DegreeBound {
+	if srs == nil || srs.Parties < 2 ||
+		len(srs.G1Y) != srs.Parties || len(srs.G1ZShared) != srs.Parties {
 		return ErrInvalidSRS
 	}
 	return nil
@@ -210,7 +208,7 @@ func (srs *CoordinatorSRS) CommitZ(coefficients []fr.Element) (bn254.G1Affine, e
 	if err := srs.Validate(); err != nil {
 		return result, err
 	}
-	if len(coefficients) > srs.DegreeBound {
+	if len(coefficients) > srs.Parties {
 		return result, ErrPolynomialTooWide
 	}
 	if len(coefficients) == 0 {

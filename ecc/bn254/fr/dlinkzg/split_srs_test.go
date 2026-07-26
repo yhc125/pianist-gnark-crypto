@@ -67,7 +67,7 @@ func TestSplitSRSMatchesMonolithicCommitments(t *testing.T) {
 	gotAggregate.FromJacobian(&aggregate)
 	require.True(t, gotAggregate.Equal(&wantAggregate))
 
-	coordinator, err := NewDeterministicCoordinatorSRS(parties, degreeBound, tauY, tauZ)
+	coordinator, err := NewDeterministicCoordinatorSRS(parties, tauY, tauZ)
 	require.NoError(t, err)
 	yPolynomial := []fr.Element{element(3), element(5), element(7), element(11)}
 	gotY, err := coordinator.CommitY(yPolynomial)
@@ -75,9 +75,7 @@ func TestSplitSRSMatchesMonolithicCommitments(t *testing.T) {
 	wantY, err := CommitY(yPolynomial, monolithic)
 	require.NoError(t, err)
 	require.True(t, gotY.Equal(&wantY))
-	coordinatorZPolynomial := []fr.Element{
-		element(13), element(17), element(19), element(23), element(29),
-	}
+	coordinatorZPolynomial := []fr.Element{element(13), element(17), element(19), element(23)}
 	gotCoordinatorZ, err := coordinator.CommitZ(coordinatorZPolynomial)
 	require.NoError(t, err)
 	wantCoordinatorZ, err := CommitZ(coordinatorZPolynomial, monolithic)
@@ -205,10 +203,10 @@ func TestSplitSRSMemoryShapes(t *testing.T) {
 	require.Equal(t, 7, row.Rank)
 	require.Equal(t, parties, row.Parties)
 
-	coordinator, err := NewDeterministicCoordinatorSRS(parties, degreeBound, tauY, tauZ)
+	coordinator, err := NewDeterministicCoordinatorSRS(parties, tauY, tauZ)
 	require.NoError(t, err)
 	require.Len(t, coordinator.G1Y, parties)
-	require.Len(t, coordinator.G1ZShared, degreeBound)
+	require.Len(t, coordinator.G1ZShared, parties)
 
 	verifier := NewDeterministicVerifierSRS(tauY, tauZ)
 	require.Len(t, verifier.G1ZVerifier, verifierG1ZPowers)
@@ -253,22 +251,22 @@ func TestSplitSRSRejectsMalformedRankAndDegree(t *testing.T) {
 	_, err = nilRow.CommitZ(nil)
 	require.ErrorIs(t, err, ErrInvalidSRS)
 
-	_, err = NewDeterministicCoordinatorSRS(4, 3, tauY, tauZ)
+	_, err = NewDeterministicCoordinatorSRS(1, tauY, tauZ)
 	require.ErrorIs(t, err, ErrInvalidSRS)
-	coordinator, err := NewDeterministicCoordinatorSRS(4, 8, tauY, tauZ)
+	coordinator, err := NewDeterministicCoordinatorSRS(4, tauY, tauZ)
 	require.NoError(t, err)
 	_, err = coordinator.CommitY(make([]fr.Element, 5))
 	require.ErrorIs(t, err, ErrPolynomialTooWide)
-	_, err = coordinator.CommitZ(make([]fr.Element, 9))
+	_, err = coordinator.CommitZ(make([]fr.Element, 5))
 	require.ErrorIs(t, err, ErrPolynomialTooWide)
 	coordinator.G1Y = coordinator.G1Y[:3]
 	_, err = coordinator.CommitY(nil)
 	require.ErrorIs(t, err, ErrInvalidSRS)
 	_, err = coordinator.CommitZ(nil)
 	require.ErrorIs(t, err, ErrInvalidSRS)
-	coordinator, err = NewDeterministicCoordinatorSRS(4, 8, tauY, tauZ)
+	coordinator, err = NewDeterministicCoordinatorSRS(4, tauY, tauZ)
 	require.NoError(t, err)
-	coordinator.G1ZShared = coordinator.G1ZShared[:7]
+	coordinator.G1ZShared = coordinator.G1ZShared[:3]
 	_, err = coordinator.CommitZ(nil)
 	require.ErrorIs(t, err, ErrInvalidSRS)
 	var nilCoordinator *CoordinatorSRS
