@@ -12,33 +12,41 @@ const (
 	// views from an MPC-generated rectangular SRS and erase every trapdoor.
 	DeterministicSplitSRSNotice = "deterministic split SRS: benchmark/test only; use an MPC-generated SRS in production"
 
-	verifierYPowers = 2
-	verifierZPowers = 4
+	verifierYPowers   = 2
+	verifierZPowers   = 4
+	verifierG1ZPowers = 3
 )
 
-// PartyRowSRS is the rank-local row of a rectangular monomial SRS. G1Row[j]
-// equals [tauY^Rank tauZ^j]_1. It contains no other party row and no G2 power.
+// PartyRowSRS contains the two O(T) G1 rows needed by one prover. G1Row[j]
+// equals [tauY^Rank tauZ^j]_1 for mixed rectangular source commitments, while
+// G1ZShared[j] equals [tauZ^j]_1 for the logical Y^0 commitments in U0--U3. It
+// contains no other party rank and no G2 power.
 type PartyRowSRS struct {
 	Rank        int
 	Parties     int
 	DegreeBound int
 	G1Row       []bn254.G1Affine
+	G1ZShared   []bn254.G1Affine
 }
 
-// CoordinatorSRS is the root-only Y column of a rectangular monomial SRS.
-// G1Y[i] equals [tauY^i]_1. It contains no Z row and no G2 power.
+// CoordinatorSRS contains the O(M) root-only Y column and the shared O(T) Z
+// row needed to commit t_0, t_1, and h_xi. It contains no mixed party row and
+// no G2 power.
 type CoordinatorSRS struct {
-	Parties int
-	G1Y     []bn254.G1Affine
+	Parties     int
+	DegreeBound int
+	G1Y         []bn254.G1Affine
+	G1ZShared   []bn254.G1Affine
 }
 
 // VerifierSRS is the constant-size verifier view used by the source link and
-// the degree-three/degree-two same-set batches. G2Y contains powers 0 and 1;
-// G2Z contains powers 0 through 3.
+// the degree-three/degree-two same-set batches. G1ZVerifier contains powers 0
+// through 2 for public interpolant commitments, G2Y contains powers 0 and 1,
+// and G2Z contains powers 0 through 3.
 type VerifierSRS struct {
-	G1Base bn254.G1Affine
-	G2Y    []bn254.G2Affine
-	G2Z    []bn254.G2Affine
+	G1ZVerifier []bn254.G1Affine
+	G2Y         []bn254.G2Affine
+	G2Z         []bn254.G2Affine
 }
 
 // NewDeterministicPartyRowSRS constructs one party row directly, without
@@ -51,29 +59,34 @@ func NewDeterministicPartyRowSRS(parties, degreeBound, rank int, tauY, tauZ fr.E
 	}
 	_, _, generator1, _ := bn254.Generators()
 	zScalars := powers(tauZ, degreeBound)
+	g1ZShared := batchScalarMultiplicationG1(&generator1, zScalars)
 	yRank := fieldExponent(tauY, rank)
-	for j := range zScalars {
-		zScalars[j].Mul(&zScalars[j], &yRank)
+	mixedScalars := append([]fr.Element(nil), zScalars...)
+	for j := range mixedScalars {
+		mixedScalars[j].Mul(&mixedScalars[j], &yRank)
 	}
 	return &PartyRowSRS{
 		Rank:        rank,
 		Parties:     parties,
 		DegreeBound: degreeBound,
-		G1Row:       batchScalarMultiplicationG1(&generator1, zScalars),
+		G1Row:       batchScalarMultiplicationG1(&generator1, mixedScalars),
+		G1ZShared:   g1ZShared,
 	}, nil
 }
 
-// NewDeterministicCoordinatorSRS constructs the root-only Y column without
-// materializing any party Z row. It is benchmark/test-only; see
-// DeterministicSplitSRSNotice. The trapdoor is not retained.
-func NewDeterministicCoordinatorSRS(parties int, tauY fr.Element) (*CoordinatorSRS, error) {
-	if parties < 2 {
+// NewDeterministicCoordinatorSRS constructs the root Y column and shared Z row
+// without materializing a mixed party rectangle. It is benchmark/test-only;
+// see DeterministicSplitSRSNotice. Neither trapdoor is retained.
+func NewDeterministicCoordinatorSRS(parties, degreeBound int, tauY, tauZ fr.Element) (*CoordinatorSRS, error) {
+	if parties < 2 || degreeBound < verifierZPowers {
 		return nil, ErrInvalidSRS
 	}
 	_, _, generator1, _ := bn254.Generators()
 	return &CoordinatorSRS{
-		Parties: parties,
-		G1Y:     batchScalarMultiplicationG1(&generator1, powers(tauY, parties)),
+		Parties:     parties,
+		DegreeBound: degreeBound,
+		G1Y:         batchScalarMultiplicationG1(&generator1, powers(tauY, parties)),
+		G1ZShared:   batchScalarMultiplicationG1(&generator1, powers(tauZ, degreeBound)),
 	}, nil
 }
 
@@ -83,7 +96,10 @@ func NewDeterministicCoordinatorSRS(parties int, tauY fr.Element) (*CoordinatorS
 func NewDeterministicVerifierSRS(tauY, tauZ fr.Element) *VerifierSRS {
 	_, _, generator1, generator2 := bn254.Generators()
 	return &VerifierSRS{
-		G1Base: generator1,
+		G1ZVerifier: batchScalarMultiplicationG1(
+			&generator1,
+			powers(tauZ, verifierG1ZPowers),
+		),
 		G2Y: batchScalarMultiplicationG2(
 			&generator2,
 			powers(tauY, verifierYPowers),
@@ -98,7 +114,8 @@ func NewDeterministicVerifierSRS(tauY, tauZ fr.Element) *VerifierSRS {
 // Validate checks that the party view has exactly one complete rank row.
 func (srs *PartyRowSRS) Validate() error {
 	if srs == nil || srs.Parties < 2 || srs.DegreeBound < verifierZPowers ||
-		srs.Rank < 0 || srs.Rank >= srs.Parties || len(srs.G1Row) != srs.DegreeBound {
+		srs.Rank < 0 || srs.Rank >= srs.Parties ||
+		len(srs.G1Row) != srs.DegreeBound || len(srs.G1ZShared) != srs.DegreeBound {
 		return ErrInvalidSRS
 	}
 	return nil
@@ -107,7 +124,8 @@ func (srs *PartyRowSRS) Validate() error {
 // Validate checks that the coordinator view has exactly the declared Y
 // column and no rectangular row material.
 func (srs *CoordinatorSRS) Validate() error {
-	if srs == nil || srs.Parties < 2 || len(srs.G1Y) != srs.Parties {
+	if srs == nil || srs.Parties < 2 || srs.DegreeBound < verifierZPowers ||
+		len(srs.G1Y) != srs.Parties || len(srs.G1ZShared) != srs.DegreeBound {
 		return ErrInvalidSRS
 	}
 	return nil
@@ -115,7 +133,8 @@ func (srs *CoordinatorSRS) Validate() error {
 
 // Validate checks the constant verifier-key shape required by the protocol.
 func (srs *VerifierSRS) Validate() error {
-	if srs == nil || len(srs.G2Y) != verifierYPowers || len(srs.G2Z) != verifierZPowers {
+	if srs == nil || len(srs.G1ZVerifier) != verifierG1ZPowers ||
+		len(srs.G2Y) != verifierYPowers || len(srs.G2Z) != verifierZPowers {
 		return ErrInvalidSRS
 	}
 	return nil
@@ -136,6 +155,28 @@ func (srs *PartyRowSRS) CommitRow(p []fr.Element) (bn254.G1Affine, error) {
 	}
 	_, err := result.MultiExp(
 		srs.G1Row[:len(p)],
+		p,
+		ecc.MultiExpConfig{ScalarsMont: true},
+	)
+	return result, err
+}
+
+// CommitZ commits a logical univariate polynomial in the shared Y^0 row:
+// [sum_j p[j] tauZ^j]_1. This is distinct from CommitRow when Rank is nonzero
+// and is used for g_{j,i}, S_i^lin, W_{G,i}, and W_{L,i}.
+func (srs *PartyRowSRS) CommitZ(p []fr.Element) (bn254.G1Affine, error) {
+	var result bn254.G1Affine
+	if err := srs.Validate(); err != nil {
+		return result, err
+	}
+	if len(p) > srs.DegreeBound {
+		return result, ErrPolynomialTooWide
+	}
+	if len(p) == 0 {
+		return result, nil
+	}
+	_, err := result.MultiExp(
+		srs.G1ZShared[:len(p)],
 		p,
 		ecc.MultiExpConfig{ScalarsMont: true},
 	)
@@ -163,13 +204,83 @@ func (srs *CoordinatorSRS) CommitY(coefficients []fr.Element) (bn254.G1Affine, e
 	return result, err
 }
 
+// CommitZ commits a coordinator polynomial in the shared Y^0 row.
+func (srs *CoordinatorSRS) CommitZ(coefficients []fr.Element) (bn254.G1Affine, error) {
+	var result bn254.G1Affine
+	if err := srs.Validate(); err != nil {
+		return result, err
+	}
+	if len(coefficients) > srs.DegreeBound {
+		return result, ErrPolynomialTooWide
+	}
+	if len(coefficients) == 0 {
+		return result, nil
+	}
+	_, err := result.MultiExp(
+		srs.G1ZShared[:len(coefficients)],
+		coefficients,
+		ecc.MultiExpConfig{ScalarsMont: true},
+	)
+	return result, err
+}
+
+// CommitZ commits a public degree-at-most-two interpolant using only the
+// verifier view.
+func (srs *VerifierSRS) CommitZ(coefficients []fr.Element) (bn254.G1Affine, error) {
+	var result bn254.G1Affine
+	if err := srs.Validate(); err != nil {
+		return result, err
+	}
+	if len(coefficients) > len(srs.G1ZVerifier) {
+		return result, ErrPolynomialTooWide
+	}
+	if len(coefficients) == 0 {
+		return result, nil
+	}
+	_, err := result.MultiExp(
+		srs.G1ZVerifier[:len(coefficients)],
+		coefficients,
+		ecc.MultiExpConfig{ScalarsMont: true},
+	)
+	return result, err
+}
+
+// FoldSameSetCommitments derives a same-set numerator commitment using only
+// the constant verifier G1 view. Consequently every public interpolant must
+// have degree at most two.
+func (srs *VerifierSRS) FoldSameSetCommitments(commitments []bn254.G1Affine, interpolants [][]fr.Element, kappa fr.Element) (bn254.G1Affine, error) {
+	var result bn254.G1Affine
+	if len(commitments) != len(interpolants) {
+		return result, ErrMismatchedInput
+	}
+	if err := srs.Validate(); err != nil {
+		return result, err
+	}
+	var resultJac bn254.G1Jac
+	power := fr.One()
+	for i := range commitments {
+		interpolantCommitment, err := srs.CommitZ(interpolants[i])
+		if err != nil {
+			return bn254.G1Affine{}, err
+		}
+		difference := subtractG1(commitments[i], interpolantCommitment)
+		scaled := scaleG1(difference, power)
+		var scaledJac bn254.G1Jac
+		scaledJac.FromAffine(&scaled)
+		resultJac.AddAssign(&scaledJac)
+		power.Mul(&power, &kappa)
+	}
+	result.FromJacobian(&resultJac)
+	return result, nil
+}
+
 // VerifySourceLink checks a source-link proof using only the constant-size
 // verifier view.
 func (srs *VerifierSRS) VerifySourceLink(commitment bn254.G1Affine, beta, zChallenge fr.Element, proof SourceLinkProof) error {
 	if err := srs.Validate(); err != nil {
 		return err
 	}
-	a0 := subtractG1Scalar(commitment, srs.G1Base, proof.ClaimedValue)
+	a0 := subtractG1Scalar(commitment, srs.G1ZVerifier[0], proof.ClaimedValue)
 	zDirection := subtractG2Scalar(srs.G2Z[1], srs.G2Z[0], zChallenge)
 	yDirection := subtractG2Scalar(srs.G2Y[1], srs.G2Y[0], beta)
 	ok, err := bn254.PairingCheck(
@@ -204,7 +315,7 @@ func (srs *VerifierSRS) VerifyDeltaBatch(statement DeltaBatchStatement, proof De
 		return err
 	}
 
-	a0 := subtractG1Scalar(statement.SourceCommitment, srs.G1Base, statement.SourceValue)
+	a0 := subtractG1Scalar(statement.SourceCommitment, srs.G1ZVerifier[0], statement.SourceValue)
 	var deltaSquared fr.Element
 	deltaSquared.Square(&delta)
 	left := addG1(a0, scaleG1(statement.NumeratorG, delta))

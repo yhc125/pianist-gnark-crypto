@@ -29,6 +29,7 @@ func TestSplitSRSMatchesMonolithicCommitments(t *testing.T) {
 		require.NoError(t, rowErr)
 		require.Equal(t, rank, row.Rank)
 		require.Equal(t, degreeBound, len(row.G1Row))
+		require.Equal(t, degreeBound, len(row.G1ZShared))
 
 		polynomial := make([]fr.Element, degreeBound-rank)
 		for j := range polynomial {
@@ -46,6 +47,15 @@ func TestSplitSRSMatchesMonolithicCommitments(t *testing.T) {
 		require.NoError(t, commitErr)
 		require.True(t, got.Equal(&expected), "rank %d commitment", rank)
 
+		gotZ, commitErr := row.CommitZ(polynomial)
+		require.NoError(t, commitErr)
+		expectedZ, commitErr := CommitZ(polynomial, monolithic)
+		require.NoError(t, commitErr)
+		require.True(t, gotZ.Equal(&expectedZ), "rank %d shared-Z commitment", rank)
+		if rank > 0 {
+			require.False(t, got.Equal(&gotZ), "rank %d mixed and Y^0 rows were conflated", rank)
+		}
+
 		var gotJac bn254.G1Jac
 		gotJac.FromAffine(&got)
 		aggregate.AddAssign(&gotJac)
@@ -57,7 +67,7 @@ func TestSplitSRSMatchesMonolithicCommitments(t *testing.T) {
 	gotAggregate.FromJacobian(&aggregate)
 	require.True(t, gotAggregate.Equal(&wantAggregate))
 
-	coordinator, err := NewDeterministicCoordinatorSRS(parties, tauY)
+	coordinator, err := NewDeterministicCoordinatorSRS(parties, degreeBound, tauY, tauZ)
 	require.NoError(t, err)
 	yPolynomial := []fr.Element{element(3), element(5), element(7), element(11)}
 	gotY, err := coordinator.CommitY(yPolynomial)
@@ -65,10 +75,20 @@ func TestSplitSRSMatchesMonolithicCommitments(t *testing.T) {
 	wantY, err := CommitY(yPolynomial, monolithic)
 	require.NoError(t, err)
 	require.True(t, gotY.Equal(&wantY))
+	coordinatorZPolynomial := []fr.Element{
+		element(13), element(17), element(19), element(23), element(29),
+	}
+	gotCoordinatorZ, err := coordinator.CommitZ(coordinatorZPolynomial)
+	require.NoError(t, err)
+	wantCoordinatorZ, err := CommitZ(coordinatorZPolynomial, monolithic)
+	require.NoError(t, err)
+	require.True(t, gotCoordinatorZ.Equal(&wantCoordinatorZ))
 
 	verifier := NewDeterministicVerifierSRS(tauY, tauZ)
 	require.NoError(t, verifier.Validate())
-	require.True(t, verifier.G1Base.Equal(&monolithic.G1Rect[0][0]))
+	for i := range verifier.G1ZVerifier {
+		require.True(t, verifier.G1ZVerifier[i].Equal(&monolithic.G1Rect[0][i]))
+	}
 	for i := range verifier.G2Y {
 		require.True(t, verifier.G2Y[i].Equal(&monolithic.G2Y[i]))
 	}
@@ -136,6 +156,12 @@ func TestSplitVerifierMatchesMonolithicDeltaBatch(t *testing.T) {
 	require.NoError(t, err)
 	numeratorL, err := FoldSameSetCommitments(lCommitments, lResult.Interpolants, kappa, monolithic)
 	require.NoError(t, err)
+	splitNumeratorG, err := verifier.FoldSameSetCommitments(gCommitments, gResult.Interpolants, kappa)
+	require.NoError(t, err)
+	require.True(t, splitNumeratorG.Equal(&numeratorG))
+	splitNumeratorL, err := verifier.FoldSameSetCommitments(lCommitments, lResult.Interpolants, kappa)
+	require.NoError(t, err)
+	require.True(t, splitNumeratorL.Equal(&numeratorL))
 	wG, err := CommitZ(gResult.Quotient, monolithic)
 	require.NoError(t, err)
 	wL, err := CommitZ(lResult.Quotient, monolithic)
@@ -162,7 +188,7 @@ func TestSplitVerifierMatchesMonolithicDeltaBatch(t *testing.T) {
 	require.NoError(t, verifier.VerifyDeltaBatch(statement, proof, delta))
 
 	tampered := proof
-	tampered.WL = addG1(tampered.WL, verifier.G1Base)
+	tampered.WL = addG1(tampered.WL, verifier.G1ZVerifier[0])
 	require.ErrorIs(t, verifier.VerifyDeltaBatch(statement, tampered, delta), ErrVerifyDeltaBatch)
 }
 
@@ -175,14 +201,17 @@ func TestSplitSRSMemoryShapes(t *testing.T) {
 	row, err := NewDeterministicPartyRowSRS(parties, degreeBound, 7, tauY, tauZ)
 	require.NoError(t, err)
 	require.Len(t, row.G1Row, degreeBound)
+	require.Len(t, row.G1ZShared, degreeBound)
 	require.Equal(t, 7, row.Rank)
 	require.Equal(t, parties, row.Parties)
 
-	coordinator, err := NewDeterministicCoordinatorSRS(parties, tauY)
+	coordinator, err := NewDeterministicCoordinatorSRS(parties, degreeBound, tauY, tauZ)
 	require.NoError(t, err)
 	require.Len(t, coordinator.G1Y, parties)
+	require.Len(t, coordinator.G1ZShared, degreeBound)
 
 	verifier := NewDeterministicVerifierSRS(tauY, tauZ)
+	require.Len(t, verifier.G1ZVerifier, verifierG1ZPowers)
 	require.Len(t, verifier.G2Y, verifierYPowers)
 	require.Len(t, verifier.G2Z, verifierZPowers)
 	require.NotEmpty(t, DeterministicSplitSRSNotice)
@@ -205,22 +234,47 @@ func TestSplitSRSRejectsMalformedRankAndDegree(t *testing.T) {
 	require.NoError(t, err)
 	_, err = row.CommitRow(make([]fr.Element, 9))
 	require.ErrorIs(t, err, ErrPolynomialTooWide)
+	_, err = row.CommitZ(make([]fr.Element, 9))
+	require.ErrorIs(t, err, ErrPolynomialTooWide)
 	row.G1Row = row.G1Row[:7]
 	_, err = row.CommitRow(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
+	_, err = row.CommitZ(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
+
+	row, err = NewDeterministicPartyRowSRS(4, 8, 2, tauY, tauZ)
+	require.NoError(t, err)
+	row.G1ZShared = row.G1ZShared[:7]
+	_, err = row.CommitZ(nil)
 	require.ErrorIs(t, err, ErrInvalidSRS)
 	var nilRow *PartyRowSRS
 	_, err = nilRow.CommitRow(nil)
 	require.ErrorIs(t, err, ErrInvalidSRS)
+	_, err = nilRow.CommitZ(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
 
-	coordinator, err := NewDeterministicCoordinatorSRS(4, tauY)
+	_, err = NewDeterministicCoordinatorSRS(4, 3, tauY, tauZ)
+	require.ErrorIs(t, err, ErrInvalidSRS)
+	coordinator, err := NewDeterministicCoordinatorSRS(4, 8, tauY, tauZ)
 	require.NoError(t, err)
 	_, err = coordinator.CommitY(make([]fr.Element, 5))
+	require.ErrorIs(t, err, ErrPolynomialTooWide)
+	_, err = coordinator.CommitZ(make([]fr.Element, 9))
 	require.ErrorIs(t, err, ErrPolynomialTooWide)
 	coordinator.G1Y = coordinator.G1Y[:3]
 	_, err = coordinator.CommitY(nil)
 	require.ErrorIs(t, err, ErrInvalidSRS)
+	_, err = coordinator.CommitZ(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
+	coordinator, err = NewDeterministicCoordinatorSRS(4, 8, tauY, tauZ)
+	require.NoError(t, err)
+	coordinator.G1ZShared = coordinator.G1ZShared[:7]
+	_, err = coordinator.CommitZ(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
 	var nilCoordinator *CoordinatorSRS
 	_, err = nilCoordinator.CommitY(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
+	_, err = nilCoordinator.CommitZ(nil)
 	require.ErrorIs(t, err, ErrInvalidSRS)
 
 	verifier := NewDeterministicVerifierSRS(tauY, tauZ)
@@ -236,6 +290,23 @@ func TestSplitSRSRejectsMalformedRankAndDegree(t *testing.T) {
 		verifier.VerifyDeltaBatch(tooWideStatement, tooWideProof, tooWideDelta),
 		ErrPolynomialTooWide,
 	)
+	_, err = verifier.CommitZ(make([]fr.Element, verifierG1ZPowers+1))
+	require.ErrorIs(t, err, ErrPolynomialTooWide)
+	_, err = verifier.FoldSameSetCommitments(
+		[]bn254.G1Affine{verifier.G1ZVerifier[0]},
+		nil,
+		fr.One(),
+	)
+	require.ErrorIs(t, err, ErrMismatchedInput)
+	_, err = verifier.FoldSameSetCommitments(
+		[]bn254.G1Affine{verifier.G1ZVerifier[0]},
+		[][]fr.Element{make([]fr.Element, verifierG1ZPowers+1)},
+		fr.One(),
+	)
+	require.ErrorIs(t, err, ErrPolynomialTooWide)
+	verifier.G1ZVerifier = verifier.G1ZVerifier[:2]
+	require.ErrorIs(t, verifier.Validate(), ErrInvalidSRS)
+	verifier = NewDeterministicVerifierSRS(tauY, tauZ)
 	verifier.G2Z = verifier.G2Z[:3]
 	require.ErrorIs(t, verifier.Validate(), ErrInvalidSRS)
 	var nilVerifier *VerifierSRS
