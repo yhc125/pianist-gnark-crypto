@@ -2,6 +2,7 @@ package dlinkzg
 
 import (
 	"errors"
+	"math/rand"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
@@ -91,6 +92,129 @@ func TestBuildLocalLaurentIsAdditive(t *testing.T) {
 	want := addPolynomials(BuildLocalLaurent(first), BuildLocalLaurent(second))
 	got := BuildLocalLaurent(combined)
 	requirePolynomialEqual(t, want, got)
+}
+
+func TestBuildLocalLaurentFastMatchesNaiveRandomized(t *testing.T) {
+	rng := rand.New(rand.NewSource(0xD11C0DE))
+	lengths := []int{0, 1, 2, 3, 5, 8, 13, 16, 17, 31}
+	for trial := 0; trial < 80; trial++ {
+		input := randomLocalLaurentInput(rng, lengths)
+		want := buildLocalLaurentNaive(input)
+		got := BuildLocalLaurent(input)
+		requirePolynomialEqual(t, want, got)
+	}
+}
+
+func TestBuildLocalLaurentFastRandomizedAdditivityAndIdentity(t *testing.T) {
+	rng := rand.New(rand.NewSource(0xADD1717E))
+	lengths := []int{0, 1, 2, 4, 7, 8, 11, 16, 23}
+	for trial := 0; trial < 40; trial++ {
+		first := randomLocalLaurentInput(rng, lengths)
+		second := randomLocalLaurentInput(rng, lengths)
+		copyLaurentWeights(&second, first)
+		combined := addLocalLaurentSources(first, second)
+
+		wantSum := addPolynomials(BuildLocalLaurent(first), BuildLocalLaurent(second))
+		requirePolynomialEqual(t, wantSum, BuildLocalLaurent(combined))
+
+		for _, input := range []LocalLaurentInput{first, second, combined} {
+			witness := BuildLocalLaurent(input)
+			target := LocalLaurentDiagonal(input)
+			beta := randomNonzeroElement(rng)
+			if err := VerifyLocalLaurentIdentity(input, witness, target, beta); err != nil {
+				t.Fatalf("trial %d randomized Laurent identity: %v", trial, err)
+			}
+		}
+	}
+}
+
+func buildLocalLaurentNaive(input LocalLaurentInput) []fr.Element {
+	var witness []fr.Element
+	xiPower := fr.One()
+	for j := range input.G {
+		var scale fr.Element
+		scale.Mul(&xiPower, &input.P[j])
+		witness = addScaledPolynomial(witness, OffDiag(input.G[j], input.PsiQ[j]), scale)
+		xiPower.Mul(&xiPower, &input.Xi)
+	}
+	witness = addScaledPolynomial(witness, OffDiag(input.HXi, input.PsiR), input.Nu)
+	witness = addScaledPolynomial(witness, OffDiag(input.T0, input.AXi), fr.One())
+	witness = addScaledPolynomial(witness, OffDiag(input.T1, input.BXi), fr.One())
+	return normalizedCopy(witness)
+}
+
+func randomLocalLaurentInput(rng *rand.Rand, lengths []int) LocalLaurentInput {
+	var input LocalLaurentInput
+	for j := range input.G {
+		input.G[j] = randomLaurentPolynomial(rng, chooseLength(rng, lengths))
+		input.PsiQ[j] = randomLaurentPolynomial(rng, chooseLength(rng, lengths))
+		input.P[j] = randomElement(rng)
+	}
+	input.Xi = randomElement(rng)
+	input.HXi = randomLaurentPolynomial(rng, chooseLength(rng, lengths))
+	input.PsiR = randomLaurentPolynomial(rng, chooseLength(rng, lengths))
+	input.Nu = randomElement(rng)
+	input.T0 = randomLaurentPolynomial(rng, chooseLength(rng, lengths))
+	input.T1 = randomLaurentPolynomial(rng, chooseLength(rng, lengths))
+	input.AXi = randomLaurentPolynomial(rng, chooseLength(rng, lengths))
+	input.BXi = randomLaurentPolynomial(rng, chooseLength(rng, lengths))
+	return input
+}
+
+func randomLaurentPolynomial(rng *rand.Rand, length int) []fr.Element {
+	result := make([]fr.Element, length)
+	for i := range result {
+		result[i] = randomElement(rng)
+	}
+	// Preserve declared high zero coefficients in many cases. FastOffDiag and
+	// OffDiag must agree on the declared length, not only the normalized degree.
+	if length > 0 {
+		zeros := rng.Intn(length + 1)
+		for i := length - zeros; i < length; i++ {
+			result[i].SetZero()
+		}
+	}
+	return result
+}
+
+func randomElement(rng *rand.Rand) fr.Element {
+	var result fr.Element
+	result.SetUint64(rng.Uint64())
+	return result
+}
+
+func randomNonzeroElement(rng *rand.Rand) fr.Element {
+	for {
+		result := randomElement(rng)
+		if !result.IsZero() {
+			return result
+		}
+	}
+}
+
+func chooseLength(rng *rand.Rand, lengths []int) int {
+	return lengths[rng.Intn(len(lengths))]
+}
+
+func copyLaurentWeights(destination *LocalLaurentInput, source LocalLaurentInput) {
+	destination.PsiQ = source.PsiQ
+	destination.P = source.P
+	destination.Xi = source.Xi
+	destination.PsiR = source.PsiR
+	destination.Nu = source.Nu
+	destination.AXi = source.AXi
+	destination.BXi = source.BXi
+}
+
+func addLocalLaurentSources(first, second LocalLaurentInput) LocalLaurentInput {
+	combined := first
+	for j := range combined.G {
+		combined.G[j] = addPolynomials(first.G[j], second.G[j])
+	}
+	combined.HXi = addPolynomials(first.HXi, second.HXi)
+	combined.T0 = addPolynomials(first.T0, second.T0)
+	combined.T1 = addPolynomials(first.T1, second.T1)
+	return combined
 }
 
 func fixedLocalLaurentInstance(t *testing.T) (LocalLaurentInput, fr.Element) {
