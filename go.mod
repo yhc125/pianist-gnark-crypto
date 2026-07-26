@@ -13,6 +13,8 @@ require (
 	golang.org/x/sys v0.1.0
 )
 
+replace github.com/sunblaze-ucb/simpleMPI => ../simpleMPI
+
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect

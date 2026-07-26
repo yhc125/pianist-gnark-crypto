@@ -18,6 +18,8 @@ import (
 	"errors"
 	"hash"
 	"math/big"
+	"os"
+	"strings"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/bn254"
@@ -56,7 +58,41 @@ func eval(p []fr.Element, point fr.Element) fr.Element {
 }
 
 func init() {
-	mpi.WorldInit("_", "_", "_")
+	if strings.EqualFold(os.Getenv("PIANIST_MPI_DISABLE"), "true") || os.Getenv("PIANIST_MPI_DISABLE") == "1" {
+		// The comparison binary also contains single-process baselines.  They
+		// must be able to import this package without starting SSH workers just
+		// because the surrounding container is configured for Pianist.
+		mpi.SelfRank = 0
+		mpi.WorldSize = 1
+		return
+	}
+
+	if len(os.Args) > 1 && strings.EqualFold(os.Args[len(os.Args)-1], "slave") {
+		// simpleMPI appends the master address, port, and the "Slave"
+		// sentinel when it starts a worker over SSH.  The worker branch does
+		// not consume the master's SSH configuration.
+		mpi.WorldInit("", "", "")
+		return
+	}
+
+	ipFile := os.Getenv("PIANIST_MPI_IP_FILE")
+	sshKey := os.Getenv("PIANIST_MPI_SSH_KEY")
+	sshUser := os.Getenv("PIANIST_MPI_SSH_USER")
+
+	// The upstream implementation hard-codes placeholder paths here, which
+	// makes every binary importing dkzg panic before main starts.  A
+	// single-process world is sufficient for deterministic unit tests and
+	// local smoke benchmarks.  Multi-process runs retain the upstream SSH/TCP
+	// transport and opt into it explicitly through environment variables.
+	if ipFile == "" && sshKey == "" && sshUser == "" {
+		mpi.SelfRank = 0
+		mpi.WorldSize = 1
+		return
+	}
+	if ipFile == "" || sshKey == "" || sshUser == "" {
+		panic("dkzg: PIANIST_MPI_IP_FILE, PIANIST_MPI_SSH_KEY, and PIANIST_MPI_SSH_USER must be set together")
+	}
+	mpi.WorldInit(ipFile, sshKey, sshUser)
 }
 
 func lagrangeCalc(t uint64, tau0 fr.Element, omega *fr.Element) fr.Element {
