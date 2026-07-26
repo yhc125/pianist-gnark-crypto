@@ -17,16 +17,19 @@ const (
 	verifierG1ZPowers = 3
 )
 
-// PartyRowSRS contains the two O(T) G1 rows needed by one prover. G1Row[j]
-// equals [tauY^Rank tauZ^j]_1 for mixed rectangular source commitments, while
-// G1ZShared[j] equals [tauZ^j]_1 for the logical Y^0 commitments in U0--U3. It
-// contains no other party rank and no G2 power.
+// PartyRowSRS contains the three O(T) G1 rows needed by one prover.
+// G1SemanticRow[j] equals [tauY^Rank tauX^j]_1, where tauX=tauZ+sigma, for
+// semantic X-coordinate commitments in W0--W2 and the fixed PIOP columns.
+// G1Row[j] equals [tauY^Rank tauZ^j]_1 for translated source commitments and
+// piZ, while G1ZShared[j] equals [tauZ^j]_1 for the logical Y^0 commitments in
+// U0--U3. It contains no other party rank and no G2 power.
 type PartyRowSRS struct {
-	Rank        int
-	Parties     int
-	DegreeBound int
-	G1Row       []bn254.G1Affine
-	G1ZShared   []bn254.G1Affine
+	Rank          int
+	Parties       int
+	DegreeBound   int
+	G1SemanticRow []bn254.G1Affine
+	G1Row         []bn254.G1Affine
+	G1ZShared     []bn254.G1Affine
 }
 
 // CoordinatorSRS contains the O(M) root-only Y column and the O(M) Z prefix
@@ -48,11 +51,27 @@ type VerifierSRS struct {
 	G2Z         []bn254.G2Affine
 }
 
-// NewDeterministicPartyRowSRS constructs one party row directly, without
-// materializing the M-by-T rectangle. It is benchmark/test-only; see
-// DeterministicSplitSRSNotice. The trapdoors are used transiently and are not
-// retained in PartyRowSRS.
+// NewDeterministicPartyRowSRS preserves the original unshifted benchmark/test
+// constructor. Its semantic and native mixed rows coincide because sigma=0.
+// New code that uses the protocol's semantic X coordinate should call
+// NewDeterministicPartyRowSRSWithShift.
 func NewDeterministicPartyRowSRS(parties, degreeBound, rank int, tauY, tauZ fr.Element) (*PartyRowSRS, error) {
+	return NewDeterministicPartyRowSRSWithShift(
+		parties,
+		degreeBound,
+		rank,
+		tauY,
+		tauZ,
+		fr.Element{},
+	)
+}
+
+// NewDeterministicPartyRowSRSWithShift constructs the semantic mixed X row,
+// native mixed Z row, and shared Y^0 Z row directly, without materializing an
+// M-by-T rectangle. It is benchmark/test-only; see
+// DeterministicSplitSRSNotice. The trapdoors and sigma are used transiently
+// and are not retained in PartyRowSRS.
+func NewDeterministicPartyRowSRSWithShift(parties, degreeBound, rank int, tauY, tauZ, sigma fr.Element) (*PartyRowSRS, error) {
 	if parties < 2 || degreeBound < verifierZPowers || rank < 0 || rank >= parties {
 		return nil, ErrInvalidSRS
 	}
@@ -60,16 +79,23 @@ func NewDeterministicPartyRowSRS(parties, degreeBound, rank int, tauY, tauZ fr.E
 	zScalars := powers(tauZ, degreeBound)
 	g1ZShared := batchScalarMultiplicationG1(&generator1, zScalars)
 	yRank := fieldExponent(tauY, rank)
-	mixedScalars := append([]fr.Element(nil), zScalars...)
-	for j := range mixedScalars {
-		mixedScalars[j].Mul(&mixedScalars[j], &yRank)
+	nativeMixedScalars := append([]fr.Element(nil), zScalars...)
+	for j := range nativeMixedScalars {
+		nativeMixedScalars[j].Mul(&nativeMixedScalars[j], &yRank)
+	}
+	var tauX fr.Element
+	tauX.Add(&tauZ, &sigma)
+	semanticMixedScalars := powers(tauX, degreeBound)
+	for j := range semanticMixedScalars {
+		semanticMixedScalars[j].Mul(&semanticMixedScalars[j], &yRank)
 	}
 	return &PartyRowSRS{
-		Rank:        rank,
-		Parties:     parties,
-		DegreeBound: degreeBound,
-		G1Row:       batchScalarMultiplicationG1(&generator1, mixedScalars),
-		G1ZShared:   g1ZShared,
+		Rank:          rank,
+		Parties:       parties,
+		DegreeBound:   degreeBound,
+		G1SemanticRow: batchScalarMultiplicationG1(&generator1, semanticMixedScalars),
+		G1Row:         batchScalarMultiplicationG1(&generator1, nativeMixedScalars),
+		G1ZShared:     g1ZShared,
 	}, nil
 }
 
@@ -113,6 +139,7 @@ func NewDeterministicVerifierSRS(tauY, tauZ fr.Element) *VerifierSRS {
 func (srs *PartyRowSRS) Validate() error {
 	if srs == nil || srs.Parties < 2 || srs.DegreeBound < verifierZPowers ||
 		srs.Rank < 0 || srs.Rank >= srs.Parties ||
+		len(srs.G1SemanticRow) != srs.DegreeBound ||
 		len(srs.G1Row) != srs.DegreeBound || len(srs.G1ZShared) != srs.DegreeBound {
 		return ErrInvalidSRS
 	}
@@ -138,8 +165,33 @@ func (srs *VerifierSRS) Validate() error {
 	return nil
 }
 
-// CommitRow commits p in this party's fixed rank:
+// CommitSemantic commits p in this party's semantic X coordinate:
+// [sum_j p[j] tauY^Rank (tauZ+sigma)^j]_1. It is used by W0--W2 and the fixed
+// PIOP columns. Equivalently, it commits FastTaylorShift(p,sigma) through the
+// native mixed row.
+func (srs *PartyRowSRS) CommitSemantic(p []fr.Element) (bn254.G1Affine, error) {
+	var result bn254.G1Affine
+	if err := srs.Validate(); err != nil {
+		return result, err
+	}
+	if len(p) > srs.DegreeBound {
+		return result, ErrPolynomialTooWide
+	}
+	if len(p) == 0 {
+		return result, nil
+	}
+	_, err := result.MultiExp(
+		srs.G1SemanticRow[:len(p)],
+		p,
+		ecc.MultiExpConfig{ScalarsMont: true},
+	)
+	return result, err
+}
+
+// CommitRow commits p in this party's native Z coordinate:
 // [sum_j p[j] tauY^Rank tauZ^j]_1.
+// It is retained separately from CommitSemantic for translated sources and
+// piZ.
 func (srs *PartyRowSRS) CommitRow(p []fr.Element) (bn254.G1Affine, error) {
 	var result bn254.G1Affine
 	if err := srs.Validate(); err != nil {

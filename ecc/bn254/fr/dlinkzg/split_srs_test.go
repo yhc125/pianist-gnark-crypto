@@ -28,6 +28,7 @@ func TestSplitSRSMatchesMonolithicCommitments(t *testing.T) {
 		)
 		require.NoError(t, rowErr)
 		require.Equal(t, rank, row.Rank)
+		require.Equal(t, degreeBound, len(row.G1SemanticRow))
 		require.Equal(t, degreeBound, len(row.G1Row))
 		require.Equal(t, degreeBound, len(row.G1ZShared))
 
@@ -106,6 +107,58 @@ func TestSplitSRSMatchesMonolithicCommitments(t *testing.T) {
 		zChallenge,
 		sourceProof,
 	))
+}
+
+func TestSemanticRowMatchesNativeTaylorShift(t *testing.T) {
+	const parties = 4
+	const degreeBound = 16
+	const rank = 2
+	tauY := element(17)
+	tauZ := element(19)
+	sigma := element(23)
+	row, err := NewDeterministicPartyRowSRSWithShift(
+		parties,
+		degreeBound,
+		rank,
+		tauY,
+		tauZ,
+		sigma,
+	)
+	require.NoError(t, err)
+
+	polynomial := elements(2, 3, 5, 7, 11, 13, 17, 19)
+	semantic, err := row.CommitSemantic(polynomial)
+	require.NoError(t, err)
+	shifted := FastTaylorShift(polynomial, sigma)
+	nativeShifted, err := row.CommitRow(shifted)
+	require.NoError(t, err)
+	require.True(t, semantic.Equal(&nativeShifted))
+
+	nativeUnshifted, err := row.CommitRow(polynomial)
+	require.NoError(t, err)
+	require.False(t, semantic.Equal(&nativeUnshifted))
+
+	var tauX fr.Element
+	tauX.Add(&tauZ, &sigma)
+	semanticMonolithic, err := NewMonomialSRS(parties, degreeBound, tauY, tauX)
+	require.NoError(t, err)
+	want, err := CommitRect(
+		singleRankRectangle(parties, rank, polynomial),
+		semanticMonolithic,
+	)
+	require.NoError(t, err)
+	require.True(t, semantic.Equal(&want))
+}
+
+func TestUnshiftedPartyConstructorCompatibility(t *testing.T) {
+	row, err := NewDeterministicPartyRowSRS(4, 8, 1, element(29), element(31))
+	require.NoError(t, err)
+	polynomial := elements(1, 4, 9, 16)
+	semantic, err := row.CommitSemantic(polynomial)
+	require.NoError(t, err)
+	native, err := row.CommitRow(polynomial)
+	require.NoError(t, err)
+	require.True(t, semantic.Equal(&native))
 }
 
 func TestSplitVerifierMatchesMonolithicDeltaBatch(t *testing.T) {
@@ -196,8 +249,9 @@ func TestSplitSRSMemoryShapes(t *testing.T) {
 	tauY := element(23)
 	tauZ := element(29)
 
-	row, err := NewDeterministicPartyRowSRS(parties, degreeBound, 7, tauY, tauZ)
+	row, err := NewDeterministicPartyRowSRSWithShift(parties, degreeBound, 7, tauY, tauZ, element(31))
 	require.NoError(t, err)
+	require.Len(t, row.G1SemanticRow, degreeBound)
 	require.Len(t, row.G1Row, degreeBound)
 	require.Len(t, row.G1ZShared, degreeBound)
 	require.Equal(t, 7, row.Rank)
@@ -227,14 +281,30 @@ func TestSplitSRSRejectsMalformedRankAndDegree(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidSRS)
 	_, err = NewDeterministicPartyRowSRS(4, 8, 4, tauY, tauZ)
 	require.ErrorIs(t, err, ErrInvalidSRS)
+	_, err = NewDeterministicPartyRowSRSWithShift(4, 8, 4, tauY, tauZ, element(41))
+	require.ErrorIs(t, err, ErrInvalidSRS)
 
 	row, err := NewDeterministicPartyRowSRS(4, 8, 2, tauY, tauZ)
 	require.NoError(t, err)
+	_, err = row.CommitSemantic(make([]fr.Element, 9))
+	require.ErrorIs(t, err, ErrPolynomialTooWide)
 	_, err = row.CommitRow(make([]fr.Element, 9))
 	require.ErrorIs(t, err, ErrPolynomialTooWide)
 	_, err = row.CommitZ(make([]fr.Element, 9))
 	require.ErrorIs(t, err, ErrPolynomialTooWide)
 	row.G1Row = row.G1Row[:7]
+	_, err = row.CommitSemantic(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
+	_, err = row.CommitRow(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
+	_, err = row.CommitZ(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
+
+	row, err = NewDeterministicPartyRowSRS(4, 8, 2, tauY, tauZ)
+	require.NoError(t, err)
+	row.G1SemanticRow = row.G1SemanticRow[:7]
+	_, err = row.CommitSemantic(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
 	_, err = row.CommitRow(nil)
 	require.ErrorIs(t, err, ErrInvalidSRS)
 	_, err = row.CommitZ(nil)
@@ -243,9 +313,15 @@ func TestSplitSRSRejectsMalformedRankAndDegree(t *testing.T) {
 	row, err = NewDeterministicPartyRowSRS(4, 8, 2, tauY, tauZ)
 	require.NoError(t, err)
 	row.G1ZShared = row.G1ZShared[:7]
+	_, err = row.CommitSemantic(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
+	_, err = row.CommitRow(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
 	_, err = row.CommitZ(nil)
 	require.ErrorIs(t, err, ErrInvalidSRS)
 	var nilRow *PartyRowSRS
+	_, err = nilRow.CommitSemantic(nil)
+	require.ErrorIs(t, err, ErrInvalidSRS)
 	_, err = nilRow.CommitRow(nil)
 	require.ErrorIs(t, err, ErrInvalidSRS)
 	_, err = nilRow.CommitZ(nil)
