@@ -146,6 +146,61 @@ func FastOffDiag(f, d []fr.Element) []fr.Element {
 	return result
 }
 
+// FastOffDiagBatch returns sum_i scales[i] * FastOffDiag(left[i], right[i]).
+// It uses linearity in the Fourier domain to share the inverse FFT across the
+// complete batch. Inputs may have different declared lengths; every pair is
+// zero-padded to the largest batch length, which preserves the coefficient for
+// each positive offset.
+func FastOffDiagBatch(left, right [][]fr.Element, scales []fr.Element) []fr.Element {
+	if len(left) != len(right) || len(left) != len(scales) {
+		panic("dlinkzg: mismatched off-diagonal batch")
+	}
+	t := 0
+	for i := range left {
+		if len(left[i]) > t {
+			t = len(left[i])
+		}
+		if len(right[i]) > t {
+			t = len(right[i])
+		}
+	}
+	if t < 2 {
+		return nil
+	}
+
+	linearLength := checkedConvolutionLength(t, t)
+	domain := fft.NewDomain(uint64(linearLength))
+	accumulator := make([]fr.Element, domain.Cardinality)
+	for pair := range left {
+		if scales[pair].IsZero() || len(left[pair]) == 0 || len(right[pair]) == 0 {
+			continue
+		}
+		leftSpectrum := make([]fr.Element, domain.Cardinality)
+		rightSpectrum := make([]fr.Element, domain.Cardinality)
+		copy(leftSpectrum, left[pair])
+		for i := range right[pair] {
+			rightSpectrum[t-1-i] = right[pair][i]
+		}
+		domain.FFT(leftSpectrum, fft.DIF)
+		domain.FFT(rightSpectrum, fft.DIF)
+		for i := range accumulator {
+			var term fr.Element
+			term.Mul(&leftSpectrum[i], &rightSpectrum[i]).Mul(&term, &scales[pair])
+			accumulator[i].Add(&accumulator[i], &term)
+		}
+	}
+	domain.FFTInverse(accumulator, fft.DIT)
+
+	result := make([]fr.Element, t-1)
+	for delta := 1; delta < t; delta++ {
+		result[delta-1].Add(
+			&accumulator[t-1+delta],
+			&accumulator[t-1-delta],
+		)
+	}
+	return result
+}
+
 // fftConvolution returns the full linear convolution of two non-empty
 // coefficient vectors. A DIF forward transform and DIT inverse transform let
 // the pointwise product remain in bit-reversed order, avoiding two explicit

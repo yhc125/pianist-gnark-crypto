@@ -28,22 +28,27 @@ type LocalLaurentInput struct {
 // BuildLocalLaurent constructs S_i^lin from Equation
 // (local-dlinkzg-witness). The Xi identifiers are zero based, so the three
 // circuit scales are P_j, Xi*P_j, and Xi^2*P_j. This is the production hot
-// path: every correlation is computed by FastOffDiag in O(T log T). OffDiag is
-// retained only as the simple reference implementation used by tests.
+// path: the correlations are accumulated by FastOffDiagBatch in O(T log T),
+// sharing one inverse FFT across all six terms. OffDiag is retained only as
+// the simple reference implementation used by tests.
 func BuildLocalLaurent(input LocalLaurentInput) []fr.Element {
-	var witness []fr.Element
+	left := make([][]fr.Element, 0, 6)
+	right := make([][]fr.Element, 0, 6)
+	scales := make([]fr.Element, 0, 6)
 	var xiPower fr.Element
 	xiPower.SetOne()
 	for j := range input.G {
 		var scale fr.Element
 		scale.Mul(&xiPower, &input.P[j])
-		witness = addScaledPolynomial(witness, FastOffDiag(input.G[j], input.PsiQ[j]), scale)
+		left = append(left, input.G[j])
+		right = append(right, input.PsiQ[j])
+		scales = append(scales, scale)
 		xiPower.Mul(&xiPower, &input.Xi)
 	}
-	witness = addScaledPolynomial(witness, FastOffDiag(input.HXi, input.PsiR), input.Nu)
-	witness = addScaledPolynomial(witness, FastOffDiag(input.T0, input.AXi), fr.One())
-	witness = addScaledPolynomial(witness, FastOffDiag(input.T1, input.BXi), fr.One())
-	return normalizedCopy(witness)
+	left = append(left, input.HXi, input.T0, input.T1)
+	right = append(right, input.PsiR, input.AXi, input.BXi)
+	scales = append(scales, input.Nu, fr.One(), fr.One())
+	return normalizedCopy(FastOffDiagBatch(left, right, scales))
 }
 
 // LocalLaurentDiagonal returns a_lin,i for an honest local polynomial

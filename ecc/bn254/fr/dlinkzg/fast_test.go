@@ -114,6 +114,38 @@ func TestFastOffDiagEdgeCases(t *testing.T) {
 	}
 }
 
+func TestFastOffDiagBatchMatchesIndependentSum(t *testing.T) {
+	random := rand.New(rand.NewSource(0x4f46464442415443))
+	for _, size := range []int{1, 2, 8, 64, 256} {
+		left := make([][]fr.Element, 6)
+		right := make([][]fr.Element, 6)
+		scales := deterministicElements(random, 6)
+		var want []fr.Element
+		for i := range left {
+			leftSize := size
+			rightSize := size
+			if size > 2 {
+				leftSize -= i % 2
+				rightSize -= i % 3
+			}
+			left[i] = deterministicElements(random, leftSize)
+			right[i] = deterministicElements(random, rightSize)
+			want = addScaledPolynomial(want, FastOffDiag(left[i], right[i]), scales[i])
+		}
+		got := FastOffDiagBatch(left, right, scales)
+		assertElementsEqual(t, got, want)
+	}
+}
+
+func TestFastOffDiagBatchRejectsMismatchedInputs(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic")
+		}
+	}()
+	FastOffDiagBatch(make([][]fr.Element, 1), nil, make([]fr.Element, 1))
+}
+
 func TestCheckedConvolutionLengthBoundaries(t *testing.T) {
 	if got := checkedConvolutionLength(maxFFTCardinality/2, maxFFTCardinality/2+1); got != maxFFTCardinality {
 		t.Fatalf("exact capacity: got %d, want %d", got, maxFFTCardinality)
@@ -171,6 +203,34 @@ func BenchmarkOffDiagImplementations(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				_ = FastOffDiag(f, d)
+			}
+		})
+	}
+}
+
+func BenchmarkOffDiagBatch(b *testing.B) {
+	for _, size := range []int{1024, 4096, 16384} {
+		left := make([][]fr.Element, 6)
+		right := make([][]fr.Element, 6)
+		scales := make([]fr.Element, 6)
+		for i := range left {
+			left[i] = benchmarkElements(size)
+			right[i] = benchmarkElements(size)
+			scales[i].SetUint64(uint64(i + 1))
+		}
+		b.Run(fmt.Sprintf("independent/%d", size), func(b *testing.B) {
+			b.ReportAllocs()
+			for iteration := 0; iteration < b.N; iteration++ {
+				var result []fr.Element
+				for i := range left {
+					result = addScaledPolynomial(result, FastOffDiag(left[i], right[i]), scales[i])
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("batch/%d", size), func(b *testing.B) {
+			b.ReportAllocs()
+			for iteration := 0; iteration < b.N; iteration++ {
+				_ = FastOffDiagBatch(left, right, scales)
 			}
 		})
 	}
