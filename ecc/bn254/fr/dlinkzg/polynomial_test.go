@@ -132,6 +132,57 @@ func TestInterpolationAndExactSameSetQuotient(t *testing.T) {
 	}
 }
 
+func TestNestedSetQuotientUsesGlobalKappaPowers(t *testing.T) {
+	outerPoints := elements(2, 5, 7)
+	innerPoints := elements(5, 7)
+	outerPolynomials := [][]fr.Element{
+		elements(3, 1, 4, 1, 5, 9),
+		elements(2, 6, 5, 3, 5, 8),
+		elements(9, 7, 9, 3, 2, 3),
+	}
+	innerPolynomials := [][]fr.Element{
+		elements(8, 4, 6, 2, 6),
+		elements(4, 3, 3, 8, 3),
+		elements(2, 7, 9, 5, 0),
+		elements(2, 8, 8, 4, 1),
+	}
+	outerInputs := sameSetInputs(outerPolynomials, outerPoints)
+	innerInputs := sameSetInputs(innerPolynomials, innerPoints)
+	kappa := element(11)
+	result, err := BuildNestedSetQuotient(
+		outerInputs, outerPoints, innerInputs, innerPoints, kappa,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wantScale fr.Element
+	wantScale.SetOne()
+	for range outerInputs {
+		wantScale.Mul(&wantScale, &kappa)
+	}
+	if !result.InnerScale.Equal(&wantScale) {
+		t.Fatal("inner batch does not start after the outer kappa identifiers")
+	}
+
+	left := multiply(result.Quotient, result.Outer.Vanishing)
+	right := append([]fr.Element(nil), result.Outer.Numerator...)
+	bridgeInner := multiply(result.Bridge, result.Inner.Numerator)
+	if len(right) < len(bridgeInner) {
+		right = append(right, make([]fr.Element, len(bridgeInner)-len(right))...)
+	}
+	addScaled(right, bridgeInner, result.InnerScale)
+	requirePolynomialEqual(t, left, right)
+
+	nonNestedPoints := elements(3, 7)
+	nonNestedInputs := sameSetInputs(innerPolynomials, nonNestedPoints)
+	if _, err := BuildNestedSetQuotient(
+		outerInputs, outerPoints, nonNestedInputs, nonNestedPoints, kappa,
+	); !errors.Is(err, ErrPointSetsNotNested) {
+		t.Fatalf("expected non-nested point sets to be rejected, got %v", err)
+	}
+}
+
 func element(value uint64) fr.Element {
 	var result fr.Element
 	result.SetUint64(value)

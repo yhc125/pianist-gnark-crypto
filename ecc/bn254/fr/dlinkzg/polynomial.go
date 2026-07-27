@@ -7,16 +7,19 @@ package dlinkzg
 import (
 	"errors"
 	"fmt"
+	"runtime"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	"github.com/consensys/gnark-crypto/internal/parallel"
 )
 
 var (
-	ErrMismatchedInput = errors.New("dlinkzg: mismatched input lengths")
-	ErrDuplicatePoint  = errors.New("dlinkzg: interpolation points are not distinct")
-	ErrDivisionByZero  = errors.New("dlinkzg: polynomial division by zero")
-	ErrInexactDivision = errors.New("dlinkzg: polynomial division has a non-zero remainder")
-	ErrInvalidMLE      = errors.New("dlinkzg: coefficient vector does not fit the MLE point")
+	ErrMismatchedInput    = errors.New("dlinkzg: mismatched input lengths")
+	ErrDuplicatePoint     = errors.New("dlinkzg: interpolation points are not distinct")
+	ErrDivisionByZero     = errors.New("dlinkzg: polynomial division by zero")
+	ErrInexactDivision    = errors.New("dlinkzg: polynomial division has a non-zero remainder")
+	ErrInvalidMLE         = errors.New("dlinkzg: coefficient vector does not fit the MLE point")
+	ErrPointSetsNotNested = errors.New("dlinkzg: inner point set does not divide outer point set")
 )
 
 // SameSetInput is one polynomial and its claimed evaluations on a common
@@ -33,6 +36,17 @@ type SameSetResult struct {
 	Numerator    []fr.Element
 	Vanishing    []fr.Element
 	Quotient     []fr.Element
+}
+
+// NestedSetResult records the two ordinary same-set reductions and their
+// single quotient. Outer inputs occupy the first kappa powers; Inner inputs
+// occupy the following powers. Bridge is Z_outer/Z_inner.
+type NestedSetResult struct {
+	Outer      SameSetResult
+	Inner      SameSetResult
+	InnerScale fr.Element
+	Bridge     []fr.Element
+	Quotient   []fr.Element
 }
 
 // Eval evaluates a coefficient-form polynomial at point using Horner's rule.
@@ -241,6 +255,8 @@ func BuildSameSetQuotient(inputs []SameSetInput, points []fr.Element, kappa fr.E
 	}
 
 	result.Interpolants = make([][]fr.Element, len(inputs))
+	powers := make([]fr.Element, len(inputs))
+	maxPolynomialLength := 0
 	var power fr.Element
 	power.SetOne()
 	for i := range inputs {
@@ -252,14 +268,32 @@ func BuildSameSetQuotient(inputs []SameSetInput, points []fr.Element, kappa fr.E
 			return SameSetResult{}, err
 		}
 		result.Interpolants[i] = interpolant
-		difference := subtract(inputs[i].Polynomial, interpolant)
-		if len(result.Numerator) < len(difference) {
-			grown := make([]fr.Element, len(difference))
-			copy(grown, result.Numerator)
-			result.Numerator = grown
+		if len(inputs[i].Polynomial) > maxPolynomialLength {
+			maxPolynomialLength = len(inputs[i].Polynomial)
 		}
-		addScaled(result.Numerator, difference, power)
+		if len(interpolant) > maxPolynomialLength {
+			maxPolynomialLength = len(interpolant)
+		}
+		powers[i] = power
 		power.Mul(&power, &kappa)
+	}
+	result.Numerator = make([]fr.Element, maxPolynomialLength)
+	parallel.Execute(maxPolynomialLength, func(start, end int) {
+		for coefficient := start; coefficient < end; coefficient++ {
+			for polynomial := range inputs {
+				if coefficient >= len(inputs[polynomial].Polynomial) {
+					continue
+				}
+				var term fr.Element
+				term.Mul(&inputs[polynomial].Polynomial[coefficient], &powers[polynomial])
+				result.Numerator[coefficient].Add(&result.Numerator[coefficient], &term)
+			}
+		}
+	}, runtime.GOMAXPROCS(0))
+	for polynomial := range result.Interpolants {
+		var negativePower fr.Element
+		negativePower.Neg(&powers[polynomial])
+		addScaled(result.Numerator, result.Interpolants[polynomial], negativePower)
 	}
 	result.Numerator = normalizedCopy(result.Numerator)
 	result.Vanishing = VanishingPolynomial(points)
@@ -268,6 +302,55 @@ func BuildSameSetQuotient(inputs []SameSetInput, points []fr.Element, kappa fr.E
 		return SameSetResult{}, err
 	}
 	result.Quotient = quotient
+	return result, nil
+}
+
+// BuildNestedSetQuotient combines two same-set quotients when the inner
+// vanishing polynomial divides the outer one. If the outer batch has a
+// polynomials, global identifiers are 0,...,a-1 for Outer and
+// a,...,a+len(Inner)-1 for Inner. The returned quotient is
+//
+//	F_outer/Z_outer + kappa^a F_inner/Z_inner.
+//
+// Exact division checks the point-set nesting instead of trusting callers.
+func BuildNestedSetQuotient(
+	outerInputs []SameSetInput,
+	outerPoints []fr.Element,
+	innerInputs []SameSetInput,
+	innerPoints []fr.Element,
+	kappa fr.Element,
+) (NestedSetResult, error) {
+	var result NestedSetResult
+	outer, err := BuildSameSetQuotient(outerInputs, outerPoints, kappa)
+	if err != nil {
+		return result, err
+	}
+	inner, err := BuildSameSetQuotient(innerInputs, innerPoints, kappa)
+	if err != nil {
+		return result, err
+	}
+	bridge, err := ExactQuotient(outer.Vanishing, inner.Vanishing)
+	if err != nil {
+		return NestedSetResult{}, fmt.Errorf("%w: %v", ErrPointSetsNotNested, err)
+	}
+
+	innerScale := fr.One()
+	for range outerInputs {
+		innerScale.Mul(&innerScale, &kappa)
+	}
+	width := len(outer.Quotient)
+	if len(inner.Quotient) > width {
+		width = len(inner.Quotient)
+	}
+	quotient := make([]fr.Element, width)
+	copy(quotient, outer.Quotient)
+	addScaled(quotient, inner.Quotient, innerScale)
+
+	result.Outer = outer
+	result.Inner = inner
+	result.InnerScale = innerScale
+	result.Bridge = bridge
+	result.Quotient = normalizedCopy(quotient)
 	return result, nil
 }
 

@@ -105,6 +105,75 @@ func TestBuildLocalLaurentFastMatchesNaiveRandomized(t *testing.T) {
 	}
 }
 
+func TestBuildLocalLaurentGeometricCircuitQueriesMatchesGeneric(t *testing.T) {
+	rng := rand.New(rand.NewSource(0x47454f4c41555245))
+	for _, size := range []int{2, 3, 8, 17, 64} {
+		for trial := 0; trial < 8; trial++ {
+			input := randomLocalLaurentInput(rng, []int{size})
+			var ratios [3]fr.Element
+			for claim := range input.G {
+				ratios[claim] = randomElement(rng)
+				normalization := randomNonzeroElement(rng)
+				input.PsiQ[claim] = geometricPolynomial(size, ratios[claim], normalization)
+			}
+
+			want := BuildLocalLaurent(input)
+			got := BuildLocalLaurentWithGeometricCircuitQueries(input, ratios, nil)
+			requirePolynomialEqual(t, want, got)
+		}
+	}
+}
+
+func TestBuildLocalLaurentTranslatedCircuitQueriesMatchesCheckedPath(t *testing.T) {
+	rng := rand.New(rand.NewSource(0x5452414e534c4154))
+	for _, size := range []int{2, 3, 8, 17, 64} {
+		for trial := 0; trial < 8; trial++ {
+			input := randomLocalLaurentInput(rng, []int{size})
+			partitionWidth := 2
+			if size < partitionWidth {
+				partitionWidth = size
+			}
+			input.PsiR = randomLaurentPolynomial(rng, partitionWidth)
+			input.HXi = monomial(trial%partitionWidth, randomNonzeroElement(rng))
+			input.T0 = monomial(trial%partitionWidth, randomNonzeroElement(rng))
+			input.T1 = monomial(trial%partitionWidth, randomNonzeroElement(rng))
+			input.AXi = randomLaurentPolynomial(rng, partitionWidth)
+			input.BXi = randomLaurentPolynomial(rng, partitionWidth)
+
+			var ratios [3]fr.Element
+			for claim := range input.G {
+				ratios[claim] = randomElement(rng)
+				input.P[claim] = randomNonzeroElement(rng)
+				var normalization fr.Element
+				normalization.Inverse(&input.P[claim])
+				input.PsiQ[claim] = geometricPolynomial(size, ratios[claim], normalization)
+			}
+
+			want := BuildLocalLaurentWithGeometricCircuitQueries(input, ratios, nil)
+			translated := input
+			translated.PsiQ = [3][]fr.Element{}
+			got := BuildLocalLaurentWithTranslatedCircuitQueries(translated, ratios, nil)
+			requirePolynomialEqual(t, want, got)
+		}
+	}
+}
+
+func TestBuildLocalLaurentGeometricCircuitQueriesFallsBackForArbitraryWeights(t *testing.T) {
+	rng := rand.New(rand.NewSource(0x47454f46414c4c42))
+	input := randomLocalLaurentInput(rng, []int{16})
+	var ratios [3]fr.Element
+	for claim := range input.G {
+		ratios[claim] = randomElement(rng)
+		input.PsiQ[claim] = geometricPolynomial(16, ratios[claim], randomNonzeroElement(rng))
+	}
+	one := fr.One()
+	input.PsiQ[1][7].Add(&input.PsiQ[1][7], &one)
+
+	want := BuildLocalLaurent(input)
+	got := BuildLocalLaurentWithGeometricCircuitQueries(input, ratios, nil)
+	requirePolynomialEqual(t, want, got)
+}
+
 func TestBuildLocalLaurentFastRandomizedAdditivityAndIdentity(t *testing.T) {
 	rng := rand.New(rand.NewSource(0xADD1717E))
 	lengths := []int{0, 1, 2, 4, 7, 8, 11, 16, 23}
@@ -126,6 +195,50 @@ func TestBuildLocalLaurentFastRandomizedAdditivityAndIdentity(t *testing.T) {
 			}
 		}
 	}
+}
+
+func BenchmarkLocalLaurentGeometricCircuitQueries(b *testing.B) {
+	const size = 4096
+	var input LocalLaurentInput
+	input.Xi = fr.NewElement(17)
+	input.Nu = fr.NewElement(19)
+	input.PsiR = benchmarkElements(2)
+	input.HXi = monomial(1, fr.NewElement(23))
+	input.T0 = monomial(1, fr.NewElement(29))
+	input.T1 = monomial(1, fr.NewElement(31))
+	input.AXi = benchmarkElements(2)
+	input.BXi = benchmarkElements(2)
+
+	var ratios [3]fr.Element
+	for claim := range input.G {
+		input.G[claim] = benchmarkElements(size)
+		input.P[claim].SetUint64(uint64(37 + claim))
+		ratios[claim].SetUint64(uint64(41 + claim))
+		var normalization fr.Element
+		normalization.Inverse(&input.P[claim])
+		input.PsiQ[claim] = geometricPolynomial(size, ratios[claim], normalization)
+	}
+
+	b.Run("generic_fft", func(b *testing.B) {
+		b.ReportAllocs()
+		for iteration := 0; iteration < b.N; iteration++ {
+			_ = BuildLocalLaurent(input)
+		}
+	})
+	b.Run("geometric_recurrence", func(b *testing.B) {
+		b.ReportAllocs()
+		for iteration := 0; iteration < b.N; iteration++ {
+			_ = BuildLocalLaurentWithGeometricCircuitQueries(input, ratios, nil)
+		}
+	})
+	translated := input
+	translated.PsiQ = [3][]fr.Element{}
+	b.Run("translated_no_query_vectors", func(b *testing.B) {
+		b.ReportAllocs()
+		for iteration := 0; iteration < b.N; iteration++ {
+			_ = BuildLocalLaurentWithTranslatedCircuitQueries(translated, ratios, nil)
+		}
+	})
 }
 
 func buildLocalLaurentNaive(input LocalLaurentInput) []fr.Element {

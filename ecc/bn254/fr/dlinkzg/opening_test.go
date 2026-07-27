@@ -110,44 +110,36 @@ func TestDeltaBatchedVerification(t *testing.T) {
 		elements(2, 8, 8, 4, 1),
 	}, lPoints)
 	kappa := element(13)
-	gResult, err := BuildSameSetQuotient(gInputs, gPoints, kappa)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lResult, err := BuildSameSetQuotient(lInputs, lPoints, kappa)
+	nestedResult, err := BuildNestedSetQuotient(gInputs, gPoints, lInputs, lPoints, kappa)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	gCommitments := commitSameSetPolynomials(t, gInputs, srs)
 	lCommitments := commitSameSetPolynomials(t, lInputs, srs)
-	numeratorG, err := FoldSameSetCommitments(gCommitments, gResult.Interpolants, kappa, srs)
+	numeratorG, err := FoldSameSetCommitments(gCommitments, nestedResult.Outer.Interpolants, kappa, srs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	numeratorL, err := FoldSameSetCommitments(lCommitments, lResult.Interpolants, kappa, srs)
+	numeratorL, err := FoldSameSetCommitments(lCommitments, nestedResult.Inner.Interpolants, kappa, srs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	directNumeratorG, err := CommitZ(gResult.Numerator, srs)
+	directNumeratorG, err := CommitZ(nestedResult.Outer.Numerator, srs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !numeratorG.Equal(&directNumeratorG) {
 		t.Fatal("induced G numerator commitment differs from direct commitment")
 	}
-	directNumeratorL, err := CommitZ(lResult.Numerator, srs)
+	directNumeratorL, err := CommitZ(nestedResult.Inner.Numerator, srs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !numeratorL.Equal(&directNumeratorL) {
 		t.Fatal("induced L numerator commitment differs from direct commitment")
 	}
-	wG, err := CommitZ(gResult.Quotient, srs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wL, err := CommitZ(lResult.Quotient, srs)
+	wN, err := CommitZ(nestedResult.Quotient, srs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,16 +148,16 @@ func TestDeltaBatchedVerification(t *testing.T) {
 		SourceValue:      sourceProof.ClaimedValue,
 		Beta:             beta,
 		ZChallenge:       zChallenge,
-		NumeratorG:       numeratorG,
-		NumeratorL:       numeratorL,
-		VanishingG:       gResult.Vanishing,
-		VanishingL:       lResult.Vanishing,
+		OuterNumerator:   numeratorG,
+		InnerNumerator:   numeratorL,
+		OuterVanishing:   nestedResult.Outer.Vanishing,
+		InnerVanishing:   nestedResult.Inner.Vanishing,
+		InnerScale:       nestedResult.InnerScale,
 	}
 	proof := DeltaBatchProof{
 		PiZ: sourceProof.PiZ,
 		PiY: sourceProof.PiY,
-		WG:  wG,
-		WL:  wL,
+		WN:  wN,
 	}
 	delta := element(17)
 	if err := VerifyDeltaBatch(statement, proof, delta, srs); err != nil {
@@ -173,7 +165,7 @@ func TestDeltaBatchedVerification(t *testing.T) {
 	}
 
 	tamperedProof := proof
-	tamperedProof.WG = addG1(tamperedProof.WG, srs.G1Rect[0][0])
+	tamperedProof.WN = addG1(tamperedProof.WN, srs.G1Rect[0][0])
 	if err := VerifyDeltaBatch(statement, tamperedProof, delta, srs); !errors.Is(err, ErrVerifyDeltaBatch) {
 		t.Fatalf("tampered same-set quotient was not rejected: %v", err)
 	}

@@ -51,7 +51,7 @@ type CoordinatorSRS struct {
 }
 
 // VerifierSRS is the constant-size verifier view used by the source link and
-// the degree-three/degree-two same-set batches. G1ZVerifier contains powers 0
+// the degree-three nested-set batch. G1ZVerifier contains powers 0
 // through 2 for public interpolant commitments, G2Y contains powers 0 and 1,
 // and G2Z contains powers 0 through 3.
 type VerifierSRS struct {
@@ -222,7 +222,7 @@ func (srs *PartyRowSRS) CommitRow(p []fr.Element) (bn254.G1Affine, error) {
 
 // CommitZ commits a logical univariate polynomial in the shared Y^0 row:
 // [sum_j p[j] tauZ^j]_1. This is distinct from CommitRow when Rank is nonzero
-// and is used for g_{j,i}, S_i^lin, W_{G,i}, and W_{L,i}.
+// and is used for g_{j,i}, S_i^lin, and the nested quotient W_{N,i}.
 func (srs *PartyRowSRS) CommitZ(p []fr.Element) (bn254.G1Affine, error) {
 	var result bn254.G1Affine
 	if err := srs.Validate(); err != nil {
@@ -355,41 +355,47 @@ func (srs *VerifierSRS) VerifySourceLink(commitment bn254.G1Affine, beta, zChall
 	return nil
 }
 
-// VerifyDeltaBatch checks the final five-pairing product using only the
+// VerifyDeltaBatch checks the final four-pairing product using only the
 // constant-size verifier view. Numerator commitments are part of statement;
 // callers derive them from the public polynomial commitments and interpolants.
 func (srs *VerifierSRS) VerifyDeltaBatch(statement DeltaBatchStatement, proof DeltaBatchProof, delta fr.Element) error {
-	if delta.IsZero() {
+	if delta.IsZero() || statement.InnerScale.IsZero() {
 		return ErrInvalidChallenge
 	}
 	if err := srs.Validate(); err != nil {
 		return err
 	}
-	zG, err := srs.commitZInG2(statement.VanishingG)
+	bridge, err := nestedSourceBridge(
+		statement.OuterVanishing,
+		statement.InnerVanishing,
+		statement.ZChallenge,
+	)
 	if err != nil {
 		return err
 	}
-	zL, err := srs.commitZInG2(statement.VanishingL)
+	zOuter, err := srs.commitZInG2(statement.OuterVanishing)
 	if err != nil {
 		return err
 	}
 
 	a0 := subtractG1Scalar(statement.SourceCommitment, srs.G1ZVerifier[0], statement.SourceValue)
-	var deltaSquared fr.Element
-	deltaSquared.Square(&delta)
-	left := addG1(a0, scaleG1(statement.NumeratorG, delta))
-	left = addG1(left, scaleG1(statement.NumeratorL, deltaSquared))
-	zDirection := subtractG2Scalar(srs.G2Z[1], srs.G2Z[0], statement.ZChallenge)
+	left := addG1(a0, scaleG1(statement.OuterNumerator, delta))
+	zDirection, err := srs.commitZInG2(bridge)
+	if err != nil {
+		return err
+	}
 	yDirection := subtractG2Scalar(srs.G2Y[1], srs.G2Y[0], statement.Beta)
+	var nestedScale fr.Element
+	nestedScale.Mul(&delta, &statement.InnerScale)
+	nestedZ := subtractG1(proof.PiZ, scaleG1(statement.InnerNumerator, nestedScale))
 	ok, err := bn254.PairingCheck(
 		[]bn254.G1Affine{
 			left,
-			negG1(proof.PiZ),
+			negG1(nestedZ),
 			negG1(proof.PiY),
-			negG1(scaleG1(proof.WG, delta)),
-			negG1(scaleG1(proof.WL, deltaSquared)),
+			negG1(scaleG1(proof.WN, delta)),
 		},
-		[]bn254.G2Affine{srs.G2Z[0], zDirection, yDirection, zG, zL},
+		[]bn254.G2Affine{srs.G2Z[0], zDirection, yDirection, zOuter},
 	)
 	if err != nil {
 		return err

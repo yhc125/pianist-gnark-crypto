@@ -86,6 +86,25 @@ func TestFastOffDiagMatchesReference(t *testing.T) {
 	}
 }
 
+func TestFastOffDiagGeometricMatchesReference(t *testing.T) {
+	random := rand.New(rand.NewSource(0x47454f4d45545249))
+	for _, size := range []int{0, 1, 2, 3, 8, 31, 64, 257} {
+		t.Run(fmt.Sprintf("size_%d", size), func(t *testing.T) {
+			f := deterministicElements(random, size)
+			before := append([]fr.Element(nil), f...)
+			ratios := []fr.Element{{}, fr.One(), deterministicElements(random, 1)[0]}
+			for ratioIndex := range ratios {
+				ratio := ratios[ratioIndex]
+				d := geometricPolynomial(size, ratio, fr.One())
+				want := OffDiag(f, d)
+				got := FastOffDiagGeometric(f, ratio)
+				assertElementsEqual(t, got, want)
+			}
+			assertElementsEqual(t, f, before)
+		})
+	}
+}
+
 func TestFastOffDiagEdgeCases(t *testing.T) {
 	tests := []struct {
 		name string
@@ -144,6 +163,16 @@ func TestFastOffDiagBatchRejectsMismatchedInputs(t *testing.T) {
 		}
 	}()
 	FastOffDiagBatch(make([][]fr.Element, 1), nil, make([]fr.Element, 1))
+}
+
+func geometricPolynomial(length int, ratio, normalization fr.Element) []fr.Element {
+	result := make([]fr.Element, length)
+	power := normalization
+	for index := range result {
+		result[index] = power
+		power.Mul(&power, &ratio)
+	}
+	return result
 }
 
 func TestCheckedConvolutionLengthBoundaries(t *testing.T) {

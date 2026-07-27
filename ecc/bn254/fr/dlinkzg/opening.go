@@ -2,6 +2,7 @@ package dlinkzg
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254"
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
@@ -22,26 +23,26 @@ type SourceLinkProof struct {
 	ClaimedValue fr.Element
 }
 
-// DeltaBatchStatement contains A0's source statement and the two induced
-// same-set numerator commitments A1 and A2 from Equation (final-pairing).
+// DeltaBatchStatement contains A0's source statement and the outer/inner
+// numerator commitments of the nested-set opening batch.
 type DeltaBatchStatement struct {
 	SourceCommitment bn254.G1Affine
 	SourceValue      fr.Element
 	Beta             fr.Element
 	ZChallenge       fr.Element
-	NumeratorG       bn254.G1Affine
-	NumeratorL       bn254.G1Affine
-	VanishingG       []fr.Element
-	VanishingL       []fr.Element
+	OuterNumerator   bn254.G1Affine
+	InnerNumerator   bn254.G1Affine
+	OuterVanishing   []fr.Element
+	InnerVanishing   []fr.Element
+	InnerScale       fr.Element
 }
 
-// DeltaBatchProof contains the four quotient commitments on the right-hand
-// side of Equation (final-pairing).
+// DeltaBatchProof contains the nested quotient and the two directional
+// source-link quotients on the right-hand side of Equation (final-pairing).
 type DeltaBatchProof struct {
 	PiZ bn254.G1Affine
 	PiY bn254.G1Affine
-	WG  bn254.G1Affine
-	WL  bn254.G1Affine
+	WN  bn254.G1Affine
 }
 
 // EvalRect evaluates sum_{i,j} coefficients[i][j]Y^iZ^j at (y,z).
@@ -135,39 +136,46 @@ func FoldSameSetCommitments(commitments []bn254.G1Affine, interpolants [][]fr.El
 	return result, nil
 }
 
-// VerifyDeltaBatch checks the source link and both same-set quotients in one
-// five-pairing product, as in Equation (final-pairing).
+// VerifyDeltaBatch checks the source link and nested-set quotient in one
+// four-pairing product. The outer/inner vanishing quotient must be exactly the
+// source-link factor Z-zChallenge.
 func VerifyDeltaBatch(statement DeltaBatchStatement, proof DeltaBatchProof, delta fr.Element, srs *MonomialSRS) error {
-	if delta.IsZero() {
+	if delta.IsZero() || statement.InnerScale.IsZero() {
 		return ErrInvalidChallenge
 	}
 	if err := validateSRS(srs); err != nil {
 		return err
 	}
-	zG, err := commitZInG2(statement.VanishingG, srs)
+	bridge, err := nestedSourceBridge(
+		statement.OuterVanishing,
+		statement.InnerVanishing,
+		statement.ZChallenge,
+	)
 	if err != nil {
 		return err
 	}
-	zL, err := commitZInG2(statement.VanishingL, srs)
+	zOuter, err := commitZInG2(statement.OuterVanishing, srs)
 	if err != nil {
 		return err
 	}
 
 	a0 := subtractG1Scalar(statement.SourceCommitment, srs.G1Rect[0][0], statement.SourceValue)
-	var deltaSquared fr.Element
-	deltaSquared.Square(&delta)
-	left := addG1(a0, scaleG1(statement.NumeratorG, delta))
-	left = addG1(left, scaleG1(statement.NumeratorL, deltaSquared))
+	left := addG1(a0, scaleG1(statement.OuterNumerator, delta))
 
-	zDirection := subtractG2Scalar(srs.G2Z[1], srs.G2Z[0], statement.ZChallenge)
+	zDirection, err := commitZInG2(bridge, srs)
+	if err != nil {
+		return err
+	}
 	yDirection := subtractG2Scalar(srs.G2Y[1], srs.G2Y[0], statement.Beta)
-	negPiZ := negG1(proof.PiZ)
+	var nestedScale fr.Element
+	nestedScale.Mul(&delta, &statement.InnerScale)
+	nestedZ := subtractG1(proof.PiZ, scaleG1(statement.InnerNumerator, nestedScale))
+	negNestedZ := negG1(nestedZ)
 	negPiY := negG1(proof.PiY)
-	negWG := negG1(scaleG1(proof.WG, delta))
-	negWL := negG1(scaleG1(proof.WL, deltaSquared))
+	negWN := negG1(scaleG1(proof.WN, delta))
 	ok, err := bn254.PairingCheck(
-		[]bn254.G1Affine{left, negPiZ, negPiY, negWG, negWL},
-		[]bn254.G2Affine{srs.G2Z[0], zDirection, yDirection, zG, zL},
+		[]bn254.G1Affine{left, negNestedZ, negPiY, negWN},
+		[]bn254.G2Affine{srs.G2Z[0], zDirection, yDirection, zOuter},
 	)
 	if err != nil {
 		return err
@@ -176,6 +184,34 @@ func VerifyDeltaBatch(statement DeltaBatchStatement, proof DeltaBatchProof, delt
 		return ErrVerifyDeltaBatch
 	}
 	return nil
+}
+
+func nestedSourceBridge(outer, inner []fr.Element, zChallenge fr.Element) ([]fr.Element, error) {
+	bridge, err := ExactQuotient(outer, inner)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrPointSetsNotNested, err)
+	}
+	var negZ fr.Element
+	negZ.Neg(&zChallenge)
+	want := []fr.Element{negZ, fr.One()}
+	if !equalPolynomial(bridge, want) {
+		return nil, ErrPointSetsNotNested
+	}
+	return bridge, nil
+}
+
+func equalPolynomial(a, b []fr.Element) bool {
+	a = normalizedCopy(a)
+	b = normalizedCopy(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !a[i].Equal(&b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func subtractG1Scalar(point, base bn254.G1Affine, scalar fr.Element) bn254.G1Affine {

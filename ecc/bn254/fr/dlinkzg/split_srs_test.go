@@ -197,25 +197,21 @@ func TestSplitVerifierMatchesMonolithicDeltaBatch(t *testing.T) {
 		elements(9, 7, 9, 3),
 	}, lPoints)
 	kappa := element(67)
-	gResult, err := BuildSameSetQuotient(gInputs, gPoints, kappa)
-	require.NoError(t, err)
-	lResult, err := BuildSameSetQuotient(lInputs, lPoints, kappa)
+	nestedResult, err := BuildNestedSetQuotient(gInputs, gPoints, lInputs, lPoints, kappa)
 	require.NoError(t, err)
 	gCommitments := commitSameSetPolynomials(t, gInputs, monolithic)
 	lCommitments := commitSameSetPolynomials(t, lInputs, monolithic)
-	numeratorG, err := FoldSameSetCommitments(gCommitments, gResult.Interpolants, kappa, monolithic)
+	numeratorG, err := FoldSameSetCommitments(gCommitments, nestedResult.Outer.Interpolants, kappa, monolithic)
 	require.NoError(t, err)
-	numeratorL, err := FoldSameSetCommitments(lCommitments, lResult.Interpolants, kappa, monolithic)
+	numeratorL, err := FoldSameSetCommitments(lCommitments, nestedResult.Inner.Interpolants, kappa, monolithic)
 	require.NoError(t, err)
-	splitNumeratorG, err := verifier.FoldSameSetCommitments(gCommitments, gResult.Interpolants, kappa)
+	splitNumeratorG, err := verifier.FoldSameSetCommitments(gCommitments, nestedResult.Outer.Interpolants, kappa)
 	require.NoError(t, err)
 	require.True(t, splitNumeratorG.Equal(&numeratorG))
-	splitNumeratorL, err := verifier.FoldSameSetCommitments(lCommitments, lResult.Interpolants, kappa)
+	splitNumeratorL, err := verifier.FoldSameSetCommitments(lCommitments, nestedResult.Inner.Interpolants, kappa)
 	require.NoError(t, err)
 	require.True(t, splitNumeratorL.Equal(&numeratorL))
-	wG, err := CommitZ(gResult.Quotient, monolithic)
-	require.NoError(t, err)
-	wL, err := CommitZ(lResult.Quotient, monolithic)
+	wN, err := CommitZ(nestedResult.Quotient, monolithic)
 	require.NoError(t, err)
 
 	statement := DeltaBatchStatement{
@@ -223,23 +219,23 @@ func TestSplitVerifierMatchesMonolithicDeltaBatch(t *testing.T) {
 		SourceValue:      sourceProof.ClaimedValue,
 		Beta:             beta,
 		ZChallenge:       zChallenge,
-		NumeratorG:       numeratorG,
-		NumeratorL:       numeratorL,
-		VanishingG:       gResult.Vanishing,
-		VanishingL:       lResult.Vanishing,
+		OuterNumerator:   numeratorG,
+		InnerNumerator:   numeratorL,
+		OuterVanishing:   nestedResult.Outer.Vanishing,
+		InnerVanishing:   nestedResult.Inner.Vanishing,
+		InnerScale:       nestedResult.InnerScale,
 	}
 	proof := DeltaBatchProof{
 		PiZ: sourceProof.PiZ,
 		PiY: sourceProof.PiY,
-		WG:  wG,
-		WL:  wL,
+		WN:  wN,
 	}
 	delta := element(71)
 	require.NoError(t, VerifyDeltaBatch(statement, proof, delta, monolithic))
 	require.NoError(t, verifier.VerifyDeltaBatch(statement, proof, delta))
 
 	tampered := proof
-	tampered.WL = addG1(tampered.WL, verifier.G1ZVerifier[0])
+	tampered.WN = addG1(tampered.WN, verifier.G1ZVerifier[0])
 	require.ErrorIs(t, verifier.VerifyDeltaBatch(statement, tampered, delta), ErrVerifyDeltaBatch)
 }
 
@@ -352,9 +348,14 @@ func TestSplitSRSRejectsMalformedRankAndDegree(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidSRS)
 
 	verifier := NewDeterministicVerifierSRS(tauY, tauZ)
+	zChallenge := element(2)
+	innerVanishing := elements(1, 0, 0, 1)
+	outerVanishing := multiply(innerVanishing, []fr.Element{neg(zChallenge), fr.One()})
 	tooWideStatement := DeltaBatchStatement{
-		VanishingG: make([]fr.Element, verifierZPowers+1),
-		VanishingL: []fr.Element{fr.One()},
+		ZChallenge:     zChallenge,
+		OuterVanishing: outerVanishing,
+		InnerVanishing: innerVanishing,
+		InnerScale:     fr.One(),
 	}
 	_, _, generator1, _ := bn254.Generators()
 	tooWideProof := DeltaBatchProof{PiZ: generator1}
