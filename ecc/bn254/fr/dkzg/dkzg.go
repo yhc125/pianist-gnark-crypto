@@ -78,6 +78,10 @@ func init() {
 	ipFile := os.Getenv("PIANIST_MPI_IP_FILE")
 	sshKey := os.Getenv("PIANIST_MPI_SSH_KEY")
 	sshUser := os.Getenv("PIANIST_MPI_SSH_USER")
+	localLauncher := strings.EqualFold(
+		strings.TrimSpace(os.Getenv("SIMPLEMPI_LAUNCH_MODE")),
+		"local",
+	)
 
 	// The upstream implementation hard-codes placeholder paths here, which
 	// makes every binary importing dkzg panic before main starts.  A
@@ -89,8 +93,8 @@ func init() {
 		mpi.WorldSize = 1
 		return
 	}
-	if ipFile == "" || sshKey == "" || sshUser == "" {
-		panic("dkzg: PIANIST_MPI_IP_FILE, PIANIST_MPI_SSH_KEY, and PIANIST_MPI_SSH_USER must be set together")
+	if ipFile == "" || (!localLauncher && (sshKey == "" || sshUser == "")) {
+		panic("dkzg: PIANIST_MPI_IP_FILE is required; SSH credentials are also required unless SIMPLEMPI_LAUNCH_MODE=local")
 	}
 	mpi.WorldInit(ipFile, sshKey, sshUser)
 }

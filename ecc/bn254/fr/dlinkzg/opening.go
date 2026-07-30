@@ -9,10 +9,11 @@ import (
 )
 
 var (
-	ErrInvalidRectangle = errors.New("dlinkzg: invalid rectangular polynomial")
-	ErrInvalidChallenge = errors.New("dlinkzg: challenge must be nonzero")
-	ErrVerifySourceLink = errors.New("dlinkzg: source-link verification failed")
-	ErrVerifyDeltaBatch = errors.New("dlinkzg: delta-batched verification failed")
+	ErrInvalidRectangle  = errors.New("dlinkzg: invalid rectangular polynomial")
+	ErrInvalidChallenge  = errors.New("dlinkzg: challenge must be nonzero")
+	ErrVerifySourceLink  = errors.New("dlinkzg: source-link verification failed")
+	ErrVerifyDeltaBatch  = errors.New("dlinkzg: delta-batched verification failed")
+	ErrVerifyHybridBatch = errors.New("dlinkzg: hybrid delta-batched verification failed")
 )
 
 // SourceLinkProof proves D(beta,zChallenge)=ClaimedValue using the two
@@ -43,6 +44,29 @@ type DeltaBatchProof struct {
 	PiZ bn254.G1Affine
 	PiY bn254.G1Affine
 	WN  bn254.G1Affine
+}
+
+// HybridBatchStatement is the public statement for the preserved hybrid
+// terminal compiler: one rectangular source link and two independent
+// same-set univariate opening batches in the semantic U coordinate.
+type HybridBatchStatement struct {
+	SourceCommitment bn254.G1Affine
+	SourceValue      fr.Element
+	Beta             fr.Element
+	AlphaChallenge   fr.Element
+	CircuitNumerator bn254.G1Affine
+	LaurentNumerator bn254.G1Affine
+	CircuitVanishing []fr.Element
+	LaurentVanishing []fr.Element
+}
+
+// HybridBatchProof contains the two directional source-link quotients and
+// the two ordinary multipoint quotient commitments.
+type HybridBatchProof struct {
+	PiU   bn254.G1Affine
+	PiV   bn254.G1Affine
+	WCirc bn254.G1Affine
+	WLaur bn254.G1Affine
 }
 
 // EvalRect evaluates sum_{i,j} coefficients[i][j]Y^iZ^j at (y,z).

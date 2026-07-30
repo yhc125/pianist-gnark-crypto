@@ -21,9 +21,11 @@ const (
 	// views from an MPC-generated rectangular SRS and erase every trapdoor.
 	DeterministicSplitSRSNotice = "deterministic split SRS: benchmark/test only; use an MPC-generated SRS in production"
 
-	verifierYPowers   = 2
-	verifierZPowers   = 4
-	verifierG1ZPowers = 3
+	verifierYPowers         = 2
+	verifierZPowers         = 4
+	verifierG1ZPowers       = 3
+	hybridVerifierUPowers   = 5
+	hybridVerifierG1UPowers = 4
 )
 
 // PartyRowSRS contains the three O(T) G1 rows needed by one prover.
@@ -39,6 +41,11 @@ type PartyRowSRS struct {
 	G1SemanticRow []bn254.G1Affine
 	G1Row         []bn254.G1Affine
 	G1ZShared     []bn254.G1Affine
+	// G1UShared is the logical V^0 row in the semantic coordinate
+	// U=X=Z+sigma. The hybrid terminal compiler uses it for g_j,
+	// S^fun, and both ordinary multipoint quotients without translating the
+	// circuit sources into Z coordinates.
+	G1UShared []bn254.G1Affine
 }
 
 // CoordinatorSRS contains the O(M) root-only Y column and the O(M) Z prefix
@@ -48,6 +55,7 @@ type CoordinatorSRS struct {
 	Parties   int
 	G1Y       []bn254.G1Affine
 	G1ZShared []bn254.G1Affine
+	G1UShared []bn254.G1Affine
 }
 
 // VerifierSRS is the constant-size verifier view used by the source link and
@@ -58,6 +66,11 @@ type VerifierSRS struct {
 	G1ZVerifier []bn254.G1Affine
 	G2Y         []bn254.G2Affine
 	G2Z         []bn254.G2Affine
+	// The hybrid compiler opens semantic-U polynomials on a four-point set,
+	// so it needs G1 powers through degree three and G2 powers through degree
+	// four. These are verifier-only slices of the same rectangular SRS.
+	G1UVerifier []bn254.G1Affine
+	G2U         []bn254.G2Affine
 }
 
 // NewDeterministicPartyRowSRS preserves the original unshifted benchmark/test
@@ -95,6 +108,7 @@ func NewDeterministicPartyRowSRSWithShift(parties, degreeBound, rank int, tauY, 
 	var tauX fr.Element
 	tauX.Add(&tauZ, &sigma)
 	semanticMixedScalars := powers(tauX, degreeBound)
+	semanticShared := batchScalarMultiplicationG1(&generator1, semanticMixedScalars)
 	for j := range semanticMixedScalars {
 		semanticMixedScalars[j].Mul(&semanticMixedScalars[j], &yRank)
 	}
@@ -105,6 +119,7 @@ func NewDeterministicPartyRowSRSWithShift(parties, degreeBound, rank int, tauY, 
 		G1SemanticRow: batchScalarMultiplicationG1(&generator1, semanticMixedScalars),
 		G1Row:         batchScalarMultiplicationG1(&generator1, nativeMixedScalars),
 		G1ZShared:     g1ZShared,
+		G1UShared:     semanticShared,
 	}, nil
 }
 
@@ -112,14 +127,23 @@ func NewDeterministicPartyRowSRSWithShift(parties, degreeBound, rank int, tauY, 
 // without materializing a mixed party rectangle. It is benchmark/test-only;
 // see DeterministicSplitSRSNotice. Neither trapdoor is retained.
 func NewDeterministicCoordinatorSRS(parties int, tauY, tauZ fr.Element) (*CoordinatorSRS, error) {
+	return NewDeterministicCoordinatorSRSWithShift(parties, tauY, tauZ, fr.Element{})
+}
+
+// NewDeterministicCoordinatorSRSWithShift additionally exposes the semantic
+// U=X=Z+sigma prefix used by the hybrid terminal compiler.
+func NewDeterministicCoordinatorSRSWithShift(parties int, tauY, tauZ, sigma fr.Element) (*CoordinatorSRS, error) {
 	if parties < 2 {
 		return nil, ErrInvalidSRS
 	}
 	_, _, generator1, _ := bn254.Generators()
+	var tauU fr.Element
+	tauU.Add(&tauZ, &sigma)
 	return &CoordinatorSRS{
 		Parties:   parties,
 		G1Y:       batchScalarMultiplicationG1(&generator1, powers(tauY, parties)),
 		G1ZShared: batchScalarMultiplicationG1(&generator1, powers(tauZ, parties)),
+		G1UShared: batchScalarMultiplicationG1(&generator1, powers(tauU, parties)),
 	}, nil
 }
 
@@ -127,7 +151,15 @@ func NewDeterministicCoordinatorSRS(parties int, tauY, tauZ fr.Element) (*Coordi
 // is benchmark/test-only; see DeterministicSplitSRSNotice. Neither trapdoor is
 // retained.
 func NewDeterministicVerifierSRS(tauY, tauZ fr.Element) *VerifierSRS {
+	return NewDeterministicVerifierSRSWithShift(tauY, tauZ, fr.Element{})
+}
+
+// NewDeterministicVerifierSRSWithShift exposes both the native translated-Z
+// verifier slice and the semantic-U slice used by the hybrid compiler.
+func NewDeterministicVerifierSRSWithShift(tauY, tauZ, sigma fr.Element) *VerifierSRS {
 	_, _, generator1, generator2 := bn254.Generators()
+	var tauU fr.Element
+	tauU.Add(&tauZ, &sigma)
 	return &VerifierSRS{
 		G1ZVerifier: batchScalarMultiplicationG1(
 			&generator1,
@@ -141,6 +173,14 @@ func NewDeterministicVerifierSRS(tauY, tauZ fr.Element) *VerifierSRS {
 			&generator2,
 			powers(tauZ, verifierZPowers),
 		),
+		G1UVerifier: batchScalarMultiplicationG1(
+			&generator1,
+			powers(tauU, hybridVerifierG1UPowers),
+		),
+		G2U: batchScalarMultiplicationG2(
+			&generator2,
+			powers(tauU, hybridVerifierUPowers),
+		),
 	}
 }
 
@@ -149,7 +189,9 @@ func (srs *PartyRowSRS) Validate() error {
 	if srs == nil || srs.Parties < 2 || srs.DegreeBound < verifierZPowers ||
 		srs.Rank < 0 || srs.Rank >= srs.Parties ||
 		len(srs.G1SemanticRow) != srs.DegreeBound ||
-		len(srs.G1Row) != srs.DegreeBound || len(srs.G1ZShared) != srs.DegreeBound {
+		len(srs.G1Row) != srs.DegreeBound ||
+		len(srs.G1ZShared) != srs.DegreeBound ||
+		len(srs.G1UShared) != srs.DegreeBound {
 		return ErrInvalidSRS
 	}
 	return nil
@@ -159,7 +201,8 @@ func (srs *PartyRowSRS) Validate() error {
 // column and no rectangular row material.
 func (srs *CoordinatorSRS) Validate() error {
 	if srs == nil || srs.Parties < 2 ||
-		len(srs.G1Y) != srs.Parties || len(srs.G1ZShared) != srs.Parties {
+		len(srs.G1Y) != srs.Parties || len(srs.G1ZShared) != srs.Parties ||
+		len(srs.G1UShared) != srs.Parties {
 		return ErrInvalidSRS
 	}
 	return nil
@@ -168,7 +211,9 @@ func (srs *CoordinatorSRS) Validate() error {
 // Validate checks the constant verifier-key shape required by the protocol.
 func (srs *VerifierSRS) Validate() error {
 	if srs == nil || len(srs.G1ZVerifier) != verifierG1ZPowers ||
-		len(srs.G2Y) != verifierYPowers || len(srs.G2Z) != verifierZPowers {
+		len(srs.G2Y) != verifierYPowers || len(srs.G2Z) != verifierZPowers ||
+		len(srs.G1UVerifier) != hybridVerifierG1UPowers ||
+		len(srs.G2U) != hybridVerifierUPowers {
 		return ErrInvalidSRS
 	}
 	return nil
@@ -242,6 +287,28 @@ func (srs *PartyRowSRS) CommitZ(p []fr.Element) (bn254.G1Affine, error) {
 	return result, err
 }
 
+// CommitU commits a logical univariate polynomial in the shared V^0
+// semantic row [sum_j p[j] (tauZ+sigma)^j]_1. It is the hybrid compiler's
+// degree-aware counterpart of CommitZ.
+func (srs *PartyRowSRS) CommitU(p []fr.Element) (bn254.G1Affine, error) {
+	var result bn254.G1Affine
+	if err := srs.Validate(); err != nil {
+		return result, err
+	}
+	if len(p) > srs.DegreeBound {
+		return result, ErrPolynomialTooWide
+	}
+	if len(p) == 0 {
+		return result, nil
+	}
+	_, err := result.MultiExp(
+		srs.G1UShared[:len(p)],
+		p,
+		onlineMultiExpConfig(),
+	)
+	return result, err
+}
+
 // CommitY commits a coefficient polynomial in the root-only Y column:
 // [sum_i coefficients[i] tauY^i]_1.
 func (srs *CoordinatorSRS) CommitY(coefficients []fr.Element) (bn254.G1Affine, error) {
@@ -283,6 +350,26 @@ func (srs *CoordinatorSRS) CommitZ(coefficients []fr.Element) (bn254.G1Affine, e
 	return result, err
 }
 
+// CommitU commits a coordinator polynomial in the shared semantic V^0 row.
+func (srs *CoordinatorSRS) CommitU(coefficients []fr.Element) (bn254.G1Affine, error) {
+	var result bn254.G1Affine
+	if err := srs.Validate(); err != nil {
+		return result, err
+	}
+	if len(coefficients) > srs.Parties {
+		return result, ErrPolynomialTooWide
+	}
+	if len(coefficients) == 0 {
+		return result, nil
+	}
+	_, err := result.MultiExp(
+		srs.G1UShared[:len(coefficients)],
+		coefficients,
+		onlineMultiExpConfig(),
+	)
+	return result, err
+}
+
 // CommitZ commits a public degree-at-most-two interpolant using only the
 // verifier view.
 func (srs *VerifierSRS) CommitZ(coefficients []fr.Element) (bn254.G1Affine, error) {
@@ -302,6 +389,55 @@ func (srs *VerifierSRS) CommitZ(coefficients []fr.Element) (bn254.G1Affine, erro
 		onlineMultiExpConfig(),
 	)
 	return result, err
+}
+
+// CommitU commits a public degree-at-most-three interpolant using the hybrid
+// verifier slice.
+func (srs *VerifierSRS) CommitU(coefficients []fr.Element) (bn254.G1Affine, error) {
+	var result bn254.G1Affine
+	if err := srs.Validate(); err != nil {
+		return result, err
+	}
+	if len(coefficients) > len(srs.G1UVerifier) {
+		return result, ErrPolynomialTooWide
+	}
+	if len(coefficients) == 0 {
+		return result, nil
+	}
+	_, err := result.MultiExp(
+		srs.G1UVerifier[:len(coefficients)],
+		coefficients,
+		onlineMultiExpConfig(),
+	)
+	return result, err
+}
+
+// FoldSameSetCommitmentsU derives a same-set numerator commitment in the
+// semantic U coordinate.
+func (srs *VerifierSRS) FoldSameSetCommitmentsU(commitments []bn254.G1Affine, interpolants [][]fr.Element, kappa fr.Element) (bn254.G1Affine, error) {
+	var result bn254.G1Affine
+	if len(commitments) != len(interpolants) {
+		return result, ErrMismatchedInput
+	}
+	if err := srs.Validate(); err != nil {
+		return result, err
+	}
+	var resultJac bn254.G1Jac
+	power := fr.One()
+	for i := range commitments {
+		interpolantCommitment, err := srs.CommitU(interpolants[i])
+		if err != nil {
+			return bn254.G1Affine{}, err
+		}
+		difference := subtractG1(commitments[i], interpolantCommitment)
+		scaled := scaleG1(difference, power)
+		var scaledJac bn254.G1Jac
+		scaledJac.FromAffine(&scaled)
+		resultJac.AddAssign(&scaledJac)
+		power.Mul(&power, &kappa)
+	}
+	result.FromJacobian(&resultJac)
+	return result, nil
 }
 
 // FoldSameSetCommitments derives a same-set numerator commitment using only
@@ -406,6 +542,56 @@ func (srs *VerifierSRS) VerifyDeltaBatch(statement DeltaBatchStatement, proof De
 	return nil
 }
 
+// VerifyHybridBatch checks Equation (PCS-25): the rectangular source link
+// and the circuit/Laurent same-set batches are combined only after all seven
+// underlying G1 terms have been fixed.
+func (srs *VerifierSRS) VerifyHybridBatch(statement HybridBatchStatement, proof HybridBatchProof, delta fr.Element) error {
+	if delta.IsZero() {
+		return ErrInvalidChallenge
+	}
+	if err := srs.Validate(); err != nil {
+		return err
+	}
+	zCirc, err := srs.commitUInG2(statement.CircuitVanishing)
+	if err != nil {
+		return err
+	}
+	zLaur, err := srs.commitUInG2(statement.LaurentVanishing)
+	if err != nil {
+		return err
+	}
+
+	a0 := subtractG1Scalar(
+		statement.SourceCommitment,
+		srs.G1UVerifier[0],
+		statement.SourceValue,
+	)
+	left := addG1(a0, scaleG1(statement.CircuitNumerator, delta))
+	var deltaSquared fr.Element
+	deltaSquared.Square(&delta)
+	left = addG1(left, scaleG1(statement.LaurentNumerator, deltaSquared))
+
+	uDirection := subtractG2Scalar(srs.G2U[1], srs.G2U[0], statement.AlphaChallenge)
+	vDirection := subtractG2Scalar(srs.G2Y[1], srs.G2Y[0], statement.Beta)
+	ok, err := bn254.PairingCheck(
+		[]bn254.G1Affine{
+			left,
+			negG1(proof.PiU),
+			negG1(proof.PiV),
+			negG1(scaleG1(proof.WCirc, delta)),
+			negG1(scaleG1(proof.WLaur, deltaSquared)),
+		},
+		[]bn254.G2Affine{srs.G2U[0], uDirection, vDirection, zCirc, zLaur},
+	)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrVerifyHybridBatch
+	}
+	return nil
+}
+
 func (srs *VerifierSRS) commitZInG2(coefficients []fr.Element) (bn254.G2Affine, error) {
 	var result bn254.G2Affine
 	if err := srs.Validate(); err != nil {
@@ -419,6 +605,25 @@ func (srs *VerifierSRS) commitZInG2(coefficients []fr.Element) (bn254.G2Affine, 
 	}
 	_, err := result.MultiExp(
 		srs.G2Z[:len(coefficients)],
+		coefficients,
+		onlineMultiExpConfig(),
+	)
+	return result, err
+}
+
+func (srs *VerifierSRS) commitUInG2(coefficients []fr.Element) (bn254.G2Affine, error) {
+	var result bn254.G2Affine
+	if err := srs.Validate(); err != nil {
+		return result, err
+	}
+	if len(coefficients) > len(srs.G2U) {
+		return result, ErrPolynomialTooWide
+	}
+	if len(coefficients) == 0 {
+		return result, nil
+	}
+	_, err := result.MultiExp(
+		srs.G2U[:len(coefficients)],
 		coefficients,
 		onlineMultiExpConfig(),
 	)
